@@ -25,6 +25,12 @@ struct AlignerParams
 	bool verboseMode;
 	bool tryAllSeeds;
 	bool highMemory;
+	size_t psiLength;
+	size_t psiChunkSize;
+	size_t psiDistance;
+	size_t psiPathCount;
+	size_t psiContext;
+	size_t psiStep;
 	size_t mxmLength;
 	size_t mumCount;
 	size_t memCount;

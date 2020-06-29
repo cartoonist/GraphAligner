@@ -6,6 +6,8 @@
 #include <thread>
 #include <concurrentqueue.h> //https://github.com/cameron314/concurrentqueue
 #include <google/protobuf/util/json_util.h>
+#include <psi/seed_finder.hpp>
+#include <gum/io_utils.hpp>
 #include "Aligner.h"
 #include "CommonUtils.h"
 #include "vg.pb.h"
@@ -19,11 +21,20 @@
 #include "MinimizerSeeder.h"
 #include "AlignmentSelection.h"
 
+namespace psi {
+#ifdef PSI_STATS
+	using seeder_type = SeedFinder<WithStats>;
+#else
+	using seeder_type = SeedFinder<NoStats>;
+#endif
+	using graph_type = seeder_type::graph_type;
+}  /* --- end of namespace psi --- */
+
 struct Seeder
 {
 	enum Mode
 	{
-		None, File, Mum, Mem, Minimizer
+		None, File, Mum, Mem, Minimizer, Psi
 	};
 	Mode mode;
 	size_t mumCount;
@@ -34,8 +45,9 @@ struct Seeder
 	double minimizerSeedDensity;
 	const MummerSeeder* mummerSeeder;
 	const MinimizerSeeder* minimizerSeeder;
+	const psi::seeder_type* psiSeeder;
 	const std::unordered_map<std::string, std::vector<SeedHit>>* fileSeeds;
-	Seeder(const AlignerParams& params, const std::unordered_map<std::string, std::vector<SeedHit>>* fileSeeds, const MummerSeeder* mummerSeeder, const MinimizerSeeder* minimizerSeeder) :
+	Seeder(const AlignerParams& params, const std::unordered_map<std::string, std::vector<SeedHit>>* fileSeeds, const MummerSeeder* mummerSeeder, const MinimizerSeeder* minimizerSeeder, const psi::seeder_type* psiSeeder) :
 		mumCount(params.mumCount),
 		memCount(params.memCount),
 		mxmLength(params.mxmLength),
@@ -44,11 +56,13 @@ struct Seeder
 		minimizerSeedDensity(params.minimizerSeedDensity),
 		mummerSeeder(mummerSeeder),
 		minimizerSeeder(minimizerSeeder),
+		psiSeeder(psiSeeder),
 		fileSeeds(fileSeeds)
 	{
 		mode = Mode::None;
 		if (fileSeeds != nullptr)
 		{
+			assert(psiSeeder == nullptr);
 			assert(minimizerSeeder == nullptr);
 			assert(mummerSeeder == nullptr);
 			assert(mumCount == 0);
@@ -56,8 +70,19 @@ struct Seeder
 			assert(minimizerSeedDensity == 0);
 			mode = Mode::File;
 		}
+		if (psiSeeder != nullptr)
+		{
+			assert(minimizerSeeder == nullptr);
+			assert(fileSeeds == nullptr);
+			assert(mummerSeeder == nullptr);
+			assert(mumCount == 0);
+			assert(memCount == 0);
+			assert(minimizerSeedDensity == 0);
+			mode = Mode::Psi;
+		}
 		if (minimizerSeeder != nullptr)
 		{
+			assert(psiSeeder == nullptr);
 			assert(mummerSeeder == nullptr);
 			assert(mumCount == 0);
 			assert(memCount == 0);
@@ -67,6 +92,7 @@ struct Seeder
 		if (mummerSeeder != nullptr)
 		{
 			assert(minimizerSeeder == nullptr);
+			assert(psiSeeder == nullptr);
 			assert(fileSeeds == nullptr);
 			assert(mumCount != 0 || memCount != 0);
 			assert(minimizerSeedDensity == 0);
@@ -81,6 +107,20 @@ struct Seeder
 				assert(mumCount == 0);
 			}
 		}
+	}
+	std::vector<std::vector<SeedHit>> getSeeds(const psi::seeder_type::readsrecord_type& chunk, psi::seeder_type::readsrecord_type& seeds, psi::seeder_type::traverser_type& traverser, const AlignerParams& params) const
+	{
+		assert(mode == Mode::Psi);
+		std::vector<std::vector<SeedHit>> chunk_seeds(params.psiChunkSize);
+		psiSeeder->get_seeds(seeds, chunk, params.psiDistance);
+		auto sindex = psiSeeder->index_reads(seeds);
+		auto callback =
+				[this, &chunk_seeds, &params](const auto& hit) {
+					auto id = this->psiSeeder->get_graph_ptr()->coordinate_id(hit.node_id);
+					chunk_seeds[hit.read_id].push_back(SeedHit(id, hit.node_offset, hit.read_offset, params.psiLength, params.psiLength, false));
+				};
+		psiSeeder->seeds_all(seeds, sindex, traverser, callback);
+		return chunk_seeds;
 	}
 	std::vector<SeedHit> getSeeds(const std::string& seqName, const std::string& seq) const
 	{
@@ -99,6 +139,7 @@ struct Seeder
 			case Mode::Minimizer:
 				assert(minimizerSeeder != nullptr);
 				return minimizerSeeder->getSeeds(seq, minimizerSeedDensity);
+			case Mode::Psi:
 			case Mode::None:
 				assert(false);
 		}
@@ -226,11 +267,11 @@ void consumeBytesAndWrite(const std::string& filename, moodycamel::ConcurrentQue
 	if (!textMode && !wroteAny)
 	{
 		::google::protobuf::io::ZeroCopyOutputStream *raw_out =
-		      new ::google::protobuf::io::OstreamOutputStream(&outfile);
+					new ::google::protobuf::io::OstreamOutputStream(&outfile);
 		::google::protobuf::io::GzipOutputStream *gzip_out =
-		      new ::google::protobuf::io::GzipOutputStream(raw_out);
+					new ::google::protobuf::io::GzipOutputStream(raw_out);
 		::google::protobuf::io::CodedOutputStream *coded_out =
-		      new ::google::protobuf::io::CodedOutputStream(gzip_out);
+					new ::google::protobuf::io::CodedOutputStream(gzip_out);
 		coded_out->WriteVarint64(0);
 		delete coded_out;
 		delete gzip_out;
@@ -391,7 +432,13 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 		cerroutput = {std::cerr};
 		coutoutput = {std::cout};
 	}
-	while (true)
+	auto chunk = seeder.psiSeeder->create_readrecord();
+	auto seeds = seeder.psiSeeder->create_readrecord();
+	auto traverser = seeder.psiSeeder->create_traverser();
+	auto nof_chunks = 0;
+	std::vector<std::vector<SeedHit>> chunk_seeds;
+	
+	for ( std::size_t ridx = 0; true; ++ridx )
 	{
 		std::string* dealloc;
 		while (deallocqueue.try_dequeue(dealloc))
@@ -399,13 +446,50 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 			delete dealloc;
 		}
 		std::shared_ptr<FastQ> fastq = nullptr;
-		while (fastq == nullptr && !readFastqsQueue.try_dequeue(fastq))
+		if (ridx == length(chunk))
 		{
-			bool tryBreaking = readStreamingFinished;
-			if (!readFastqsQueue.try_dequeue(fastq) && tryBreaking) break;
-			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+			if (ridx != 0)
+			{
+				clear(chunk);
+				ridx = 0;
+			}
+			std::size_t read_count = 0;
+			do
+			{
+				fastq = nullptr;
+				while (fastq == nullptr && !readFastqsQueue.try_dequeue(fastq))
+				{
+					bool tryBreaking = readStreamingFinished;
+					if (!readFastqsQueue.try_dequeue(fastq) && tryBreaking) break;
+					std::this_thread::sleep_for(std::chrono::milliseconds(10));
+				}
+				if (fastq == nullptr) break;
+				if (seeder.mode != Seeder::Mode::Psi) break;
+				appendValue(chunk.name, fastq->seq_id);
+				appendValue(chunk.str, fastq->sequence);
+				++read_count;
+			} while (read_count != params.psiChunkSize);
+			if (seeder.mode == Seeder::Mode::Psi)
+			{
+				if (empty(chunk)) break;
+				++nof_chunks;
+				auto timeStart = std::chrono::system_clock::now();
+				chunk_seeds = seeder.getSeeds(chunk, seeds, traverser, params);
+				auto timeEnd = std::chrono::system_clock::now();
+				size_t time = std::chrono::duration_cast<std::chrono::milliseconds>(timeEnd - timeStart).count();
+				coutoutput << "Chunk " << nof_chunks << " seeding took " << time << "ms" << BufferedWriter::Flush;
+			}
+			else if (fastq == nullptr) break;
 		}
-		if (fastq == nullptr) break;
+
+		if (seeder.mode == Seeder::Mode::Psi)
+		{
+			fastq = std::make_shared<FastQ>();
+			fastq->seq_id = toCString(chunk.name[ridx]);
+			fastq->sequence = toCString(seqan::String<char, seqan::CStyle>(chunk.str[ridx]));
+			//getQualities(cur_read.quality, chunk.str[ridx]);
+		}
+
 		assertSetNoRead(fastq->seq_id);
 		coutoutput << "Read " << fastq->seq_id << " size " << fastq->sequence.size() << "bp" << BufferedWriter::Flush;
 		selectionOptions.readSize = fastq->sequence.size();
@@ -418,7 +502,32 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 		size_t clustertimems = 0;
 		try
 		{
-			if (seeder.mode != Seeder::Mode::None)
+			if (seeder.mode == Seeder::Mode::Psi)
+			{
+				std::vector<SeedHit>& seeds = chunk_seeds[ridx];
+				stats.seeds += seeds.size();
+				if (seeds.size() == 0)
+				{
+					coutoutput << "Read " << fastq->seq_id << " has no seed hits" << BufferedWriter::Flush;
+					cerroutput << "Read " << fastq->seq_id << " has no seed hits" << BufferedWriter::Flush;
+					coutoutput << "Read " << fastq->seq_id << " alignment failed" << BufferedWriter::Flush;
+					cerroutput << "Read " << fastq->seq_id << " alignment failed" << BufferedWriter::Flush;
+					continue;
+				}
+				stats.seedsFound += seeds.size();
+				stats.readsWithASeed += 1;
+				stats.bpInReadsWithASeed += fastq->sequence.size();
+				auto clusterTimeStart = std::chrono::system_clock::now();
+				OrderSeeds(alignmentGraph, seeds);
+				auto clusterTimeEnd = std::chrono::system_clock::now();
+				size_t clusterTime = std::chrono::duration_cast<std::chrono::milliseconds>(clusterTimeEnd - clusterTimeStart).count();
+				coutoutput << "Read " << fastq->seq_id << " clustering took " << clusterTime << "ms" << BufferedWriter::Flush;
+				auto alntimeStart = std::chrono::system_clock::now();
+				alignments = AlignOneWay(alignmentGraph, fastq->seq_id, fastq->sequence, params.initialBandwidth, params.rampBandwidth, params.maxCellsPerSlice, !params.verboseMode, !params.tryAllSeeds, seeds, reusableState, !params.highMemory, params.forceGlobal, params.preciseClipping, params.seedClusterMinSize, params.seedExtendDensity, params.nondeterministicOptimizations);
+				auto alntimeEnd = std::chrono::system_clock::now();
+				alntimems = std::chrono::duration_cast<std::chrono::milliseconds>(alntimeEnd - alntimeStart).count();
+			}
+			else if (seeder.mode != Seeder::Mode::None)
 			{
 				auto timeStart = std::chrono::system_clock::now();
 				std::vector<SeedHit> seeds = seeder.getSeeds(fastq->seq_id, fastq->sequence);
@@ -559,15 +668,15 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 			stats.assertionBroke = true;
 			continue;
 		}
-
 	}
 	assertSetNoRead("After all reads");
 	coutoutput << "Thread " << threadnum << " finished" << BufferedWriter::Flush;
 }
 
-AlignmentGraph getGraph(std::string graphFile, MummerSeeder** mxmSeeder, const AlignerParams& params)
+AlignmentGraph getGraph(std::string graphFile, MummerSeeder** mxmSeeder, psi::graph_type& seedGraph, psi::seeder_type** psiseeder, const AlignerParams& params)
 {
 	bool loadMxmSeeder = params.mumCount > 0 || params.memCount > 0;
+	bool loadPsi = params.psiLength != 0;
 	if (is_file_exist(graphFile)){
 		std::cout << "Load graph from " << graphFile << std::endl;
 	}
@@ -577,6 +686,32 @@ AlignmentGraph getGraph(std::string graphFile, MummerSeeder** mxmSeeder, const A
 	}
 	try
 	{
+		if (loadPsi)
+		{
+			std::cout << "Initializing Pan-genome Seed Index (PSI)" << std::endl;
+			gum::util::load(seedGraph, graphFile);
+			*psiseeder = new psi::seeder_type(seedGraph, params.psiLength);
+			/* Load the genome-wide path index for the graph if available. */
+			if ((*psiseeder)->load_path_index(params.seederCachePrefix, params.psiContext, params.psiStep))
+			{
+				std::cout << "PSI: Loaded existing path index" << std::endl;
+			}
+			/* No genome-wide path index requested. */
+			else if (params.psiPathCount == 0)
+			{
+				std::cout << "PSI: Skip path indexing since no path specified" << std::endl;
+			}
+			else
+			{
+				std::cout << "PSI: Create a path index with " << params.psiPathCount << " paths" << std::endl;
+				(*psiseeder)->create_path_index(params.psiPathCount, /*patched=*/true, params.psiContext, params.psiStep);
+				/* Serialize the indexed paths. */
+				if (!params.seederCachePrefix.empty())
+				{
+					(*psiseeder)->serialize_path_index(params.seederCachePrefix, params.psiStep);
+				}
+			}
+		}
 		if (graphFile.substr(graphFile.size()-3) == ".vg")
 		{
 			if (loadMxmSeeder)
@@ -629,7 +764,9 @@ void alignReads(AlignerParams params)
 	const std::unordered_map<std::string, std::vector<SeedHit>>* seedHitsToThreads = nullptr;
 	std::unordered_map<std::string, std::vector<SeedHit>> seedHits;
 	MummerSeeder* mummerseeder = nullptr;
-	auto alignmentGraph = getGraph(params.graphFile, &mummerseeder, params);
+	psi::seeder_type* psiseeder = nullptr;
+	psi::graph_type seedGraph;
+	auto alignmentGraph = getGraph(params.graphFile, &mummerseeder, seedGraph, &psiseeder, params);
 	bool loadMinimizerSeeder = params.minimizerSeedDensity != 0;
 	MinimizerSeeder* minimizerseeder = nullptr;
 	if (loadMinimizerSeeder)
@@ -665,12 +802,20 @@ void alignReads(AlignerParams params)
 		seedHitsToThreads = &seedHits;
 	}
 
-	Seeder seeder { params, seedHitsToThreads, mummerseeder, minimizerseeder };
+	Seeder seeder { params, seedHitsToThreads, mummerseeder, minimizerseeder, psiseeder };
 
 	switch(seeder.mode)
 	{
 		case Seeder::Mode::File:
 			std::cout << "Seeds from file" << std::endl;
+			break;
+		case Seeder::Mode::Psi:
+			std::cout << "PSI seeds, seed length " << params.psiLength
+								<< ", chunk size " << params.psiChunkSize
+								<< ", distance " << params.psiDistance
+								<< ", paths " << params.psiPathCount
+								<< ", context " << params.psiContext
+								<< ", step " << params.psiStep << std::endl;
 			break;
 		case Seeder::Mode::Mum:
 			std::cout << "MUM seeds, min length " << seeder.mxmLength;
@@ -762,6 +907,7 @@ void alignReads(AlignerParams params)
 
 	if (mummerseeder != nullptr) delete mummerseeder;
 	if (minimizerseeder != nullptr) delete minimizerseeder;
+	if (psiseeder != nullptr) delete psiseeder;
 
 	std::string* dealloc;
 	while (deallocAlns.try_dequeue(dealloc))
