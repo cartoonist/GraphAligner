@@ -4,6 +4,7 @@
 #include <functional>
 #include <algorithm>
 #include <thread>
+#include <csignal>
 #include <concurrentqueue.h> //https://github.com/cameron314/concurrentqueue
 #include <google/protobuf/util/json_util.h>
 #include <psi/seed_finder.hpp>
@@ -691,6 +692,11 @@ AlignmentGraph getGraph(std::string graphFile, MummerSeeder** mxmSeeder, psi::gr
 			std::cout << "Initializing Pan-genome Seed Index (PSI)" << std::endl;
 			gum::util::load(seedGraph, graphFile);
 			*psiseeder = new psi::seeder_type(seedGraph, params.psiLength);
+			std::signal(SIGUSR1, psi::seeder_type::stats_type::signal_handler);
+#ifdef PSI_STATS
+			std::cout << "PSI: Custom signal handler for SIGUSR1 has been set" << std::endl;
+			std::cout << "PSI: You can get the PSI::SeedFinder status report by sending SIGUSR1" << std::endl;
+#endif
 			/* Load the genome-wide path index for the graph if available. */
 			if ((*psiseeder)->load_path_index(params.seederCachePrefix, params.psiContext, params.psiStep))
 			{
