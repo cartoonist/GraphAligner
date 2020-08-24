@@ -1,5 +1,5 @@
 GPP=$(CXX)
-CPPFLAGS=-Wall -Wextra -std=c++17 -O3 -g -Iconcurrentqueue -IBBHash -Izstr/src -Iparallel-hashmap/parallel_hashmap/ `pkg-config --cflags protobuf` `pkg-config --cflags mummer` `pkg-config --cflags psi` -USEQAN_HAS_ZLIB -USEQAN_HAS_BZIP2 -fopenmp -Wno-unused-parameter
+CPPFLAGS=-Wall -Wextra -std=c++17 -O3 -g ${MACROS} -Iconcurrentqueue -IBBHash -Izstr/src -Iparallel-hashmap/parallel_hashmap/ `pkg-config --cflags protobuf` `pkg-config --cflags mummer` `pkg-config --cflags psi` -USEQAN_HAS_ZLIB -USEQAN_HAS_BZIP2 -fopenmp -Wno-unused-parameter
 
 ODIR=obj
 BINDIR=bin
