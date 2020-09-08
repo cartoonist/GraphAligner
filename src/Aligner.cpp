@@ -519,12 +519,18 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 				stats.readsWithASeed += 1;
 				stats.bpInReadsWithASeed += fastq->sequence.size();
 				auto clusterTimeStart = std::chrono::system_clock::now();
-				OrderSeeds(alignmentGraph, seeds);
+				{
+					[[maybe_unused]] auto timer = seeder.psiSeeder->get_stats().timeit_ts("seed-cluster");
+					OrderSeeds(alignmentGraph, seeds);
+				}
 				auto clusterTimeEnd = std::chrono::system_clock::now();
 				size_t clusterTime = std::chrono::duration_cast<std::chrono::milliseconds>(clusterTimeEnd - clusterTimeStart).count();
 				coutoutput << "Read " << fastq->seq_id << " clustering took " << clusterTime << "ms" << BufferedWriter::Flush;
 				auto alntimeStart = std::chrono::system_clock::now();
-				alignments = AlignOneWay(alignmentGraph, fastq->seq_id, fastq->sequence, params.initialBandwidth, params.rampBandwidth, params.maxCellsPerSlice, !params.verboseMode, !params.tryAllSeeds, seeds, reusableState, !params.highMemory, params.forceGlobal, params.preciseClipping, params.seedClusterMinSize, params.seedExtendDensity, params.nondeterministicOptimizations);
+				{
+					[[maybe_unused]] auto timer = seeder.psiSeeder->get_stats().timeit_ts("seed-extend");
+					alignments = AlignOneWay(alignmentGraph, fastq->seq_id, fastq->sequence, params.initialBandwidth, params.rampBandwidth, params.maxCellsPerSlice, !params.verboseMode, !params.tryAllSeeds, seeds, reusableState, !params.highMemory, params.forceGlobal, params.preciseClipping, params.seedClusterMinSize, params.seedExtendDensity, params.nondeterministicOptimizations);
+				}
 				auto alntimeEnd = std::chrono::system_clock::now();
 				alntimems = std::chrono::duration_cast<std::chrono::milliseconds>(alntimeEnd - alntimeStart).count();
 			}
@@ -689,6 +695,7 @@ AlignmentGraph getGraph(std::string graphFile, MummerSeeder** mxmSeeder, psi::gr
 	{
 		if (loadPsi)
 		{
+			[[maybe_unused]] auto timer = psi::seeder_type::stats_type::timer_type("psi-prepare");
 			std::cout << "Initializing Pan-genome Seed Index (PSI)" << std::endl;
 			gum::util::load(seedGraph, graphFile);
 			*psiseeder = new psi::seeder_type(seedGraph, params.psiLength);
@@ -766,6 +773,7 @@ AlignmentGraph getGraph(std::string graphFile, MummerSeeder** mxmSeeder, psi::gr
 void alignReads(AlignerParams params)
 {
 	assertSetNoRead("Preprocessing");
+	auto preProcStart = std::chrono::system_clock::now();
 
 	const std::unordered_map<std::string, std::vector<SeedHit>>* seedHitsToThreads = nullptr;
 	std::unordered_map<std::string, std::vector<SeedHit>> seedHits;
@@ -865,6 +873,10 @@ void alignReads(AlignerParams params)
 
 	std::vector<std::thread> threads;
 
+	auto preProcEnd = std::chrono::system_clock::now();
+	auto preprocms = std::chrono::duration_cast<std::chrono::milliseconds>(preProcEnd - preProcStart).count();
+	std::cout << "Preprocessing took " << preprocms << "ms" << std::endl;
+
 	assertSetNoRead("Running alignments");
 
 	moodycamel::ConcurrentQueue<std::string*> outputGAM { 50, params.numThreads, params.numThreads };
@@ -891,15 +903,19 @@ void alignReads(AlignerParams params)
 	std::thread correctedWriterThread { [file=params.outputCorrectedFile, &outputCorrected, &deallocAlns, &allThreadsDone, &correctedWriteDone, verboseMode=params.verboseMode, uncompressed=!params.compressCorrected]() { if (file != "") consumeBytesAndWrite(file, outputCorrected, deallocAlns, allThreadsDone, correctedWriteDone, verboseMode, uncompressed); else correctedWriteDone = true; } };
 	std::thread correctedClippedWriterThread { [file=params.outputCorrectedClippedFile, &outputCorrectedClipped, &deallocAlns, &allThreadsDone, &correctedClippedWriteDone, verboseMode=params.verboseMode, uncompressed=!params.compressClipped]() { if (file != "") consumeBytesAndWrite(file, outputCorrectedClipped, deallocAlns, allThreadsDone, correctedClippedWriteDone, verboseMode, uncompressed); else correctedClippedWriteDone = true; } };
 
-	for (size_t i = 0; i < params.numThreads; i++)
 	{
-		threads.emplace_back([&alignmentGraph, &readFastqsQueue, &readStreamingFinished, i, seeder, params, &outputGAM, &outputJSON, &outputGAF, &outputCorrected, &outputCorrectedClipped, &deallocAlns, &stats]() { runComponentMappings(alignmentGraph, readFastqsQueue, readStreamingFinished, i, seeder, params, outputGAM, outputJSON, outputGAF, outputCorrected, outputCorrectedClipped, deallocAlns, stats); });
+		[[maybe_unused]] auto timer = psi::seeder_type::stats_type::timer_type( "alignment" );
+		for (size_t i = 0; i < params.numThreads; i++)
+		{
+			threads.emplace_back([&alignmentGraph, &readFastqsQueue, &readStreamingFinished, i, seeder, params, &outputGAM, &outputJSON, &outputGAF, &outputCorrected, &outputCorrectedClipped, &deallocAlns, &stats]() { runComponentMappings(alignmentGraph, readFastqsQueue, readStreamingFinished, i, seeder, params, outputGAM, outputJSON, outputGAF, outputCorrected, outputCorrectedClipped, deallocAlns, stats); });
+		}
+
+		for (size_t i = 0; i < params.numThreads; i++)
+		{
+			threads[i].join();
+		}
 	}
 
-	for (size_t i = 0; i < params.numThreads; i++)
-	{
-		threads[i].join();
-	}
 	assertSetNoRead("Postprocessing");
 
 	allThreadsDone = true;
@@ -934,5 +950,10 @@ void alignReads(AlignerParams params)
 	if (stats.assertionBroke)
 	{
 		std::cout << "Alignment broke with some reads. Look at stderr output." << std::endl;
+	}
+
+	for ( const auto& timer : psi::seeder_type::stats_type::timer_type::get_timers() )
+	{
+		std::cout << "PSI timer '" << timer.first << "': " << timer.second.str() << std::endl;
 	}
 }
