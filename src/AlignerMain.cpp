@@ -69,6 +69,7 @@ int main(int argc, char** argv)
 		("seeds-psi-path-count", boost::program_options::value<size_t>(), "construct PSI path index using this number of paths (default: 0)")
 		("seeds-psi-context", boost::program_options::value<size_t>(), "PSI context length for path index construction (default: seed length)")
 		("seeds-psi-step-size", boost::program_options::value<size_t>(), "minimum (approximate) distance allowed between two consecutive uncovered loci (default: 1)")
+		("seeds-psi-gocc-threshold", boost::program_options::value<size_t>(), "Genome occurrence count threshold (default: no threshold)")
 		("seeds-minimizer-length", boost::program_options::value<size_t>(), "k-mer length for minimizer seeding (int)")
 		("seeds-minimizer-windowsize", boost::program_options::value<size_t>(), "window size for minimizer seeding (int)")
 		("seeds-minimizer-density", boost::program_options::value<double>(), "keep approximately (arg * sequence length) least common minimizers (double) (-1 for all)")
@@ -148,6 +149,7 @@ int main(int argc, char** argv)
 	params.psiPathCount = 0;
 	params.psiContext = 0;
 	params.psiStep = 1;
+	params.psiGoccThreshold = 0;
 	params.mxmLength = 20;
 	params.mumCount = 0;
 	params.memCount = 0;
@@ -222,6 +224,7 @@ int main(int argc, char** argv)
 	if (vm.count("seeds-psi-path-count")) params.psiPathCount = vm["seeds-psi-path-count"].as<size_t>();
 	if (vm.count("seeds-psi-context")) params.psiContext = vm["seeds-psi-context"].as<size_t>();
 	if (vm.count("seeds-psi-step-size")) params.psiStep = vm["seeds-psi-step-size"].as<size_t>();
+	if (vm.count("seeds-psi-gocc-threshold")) params.psiGoccThreshold = vm["seeds-psi-gocc-threshold"].as<size_t>();
 	if (vm.count("seeds-mxm-length")) params.mxmLength = vm["seeds-mxm-length"].as<size_t>();
 	if (vm.count("seeds-mem-count")) params.memCount = vm["seeds-mem-count"].as<size_t>();
 	if (vm.count("seeds-mum-count")) params.mumCount = vm["seeds-mum-count"].as<size_t>();
