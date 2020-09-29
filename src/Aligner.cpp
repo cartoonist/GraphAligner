@@ -141,6 +141,17 @@ struct Seeder
 				assert(minimizerSeeder != nullptr);
 				return minimizerSeeder->getSeeds(seq, minimizerSeedDensity);
 			case Mode::Psi:
+				assert(psiSeeder != nullptr);
+				{
+					std::vector<SeedHit> hits;
+					auto callback =
+							[this, &hits](const auto& hit) {
+								auto id = this->psiSeeder->get_graph_ptr()->coordinate_id(hit.node_id);
+								hits.push_back(SeedHit(id, hit.node_offset, hit.read_offset, hit.match_len, (hit.match_len/hit.gocc+1), false));
+							};
+					psiSeeder->seeds_on_paths(seq, callback);
+					return hits;
+				}
 			case Mode::None:
 				assert(false);
 		}
@@ -438,8 +449,9 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 	auto traverser = seeder.psiSeeder->create_traverser();
 	auto nof_chunks = 0;
 	std::vector<std::vector<SeedHit>> chunk_seeds;
-	
-	for ( std::size_t ridx = 0; true; ++ridx )
+
+	std::size_t rid = 0;  /* rid=1..|chunk| -> processing; rid=0 -> stop; rid=|chunk|+1 -> start */
+	while (true)
 	{
 		std::string* dealloc;
 		while (deallocqueue.try_dequeue(dealloc))
@@ -447,32 +459,18 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 			delete dealloc;
 		}
 		std::shared_ptr<FastQ> fastq = nullptr;
-		if (ridx == length(chunk))
+		std::vector<SeedHit> hits;
+
+		if (seeder.mode == Seeder::Mode::Psi && !rid && length(chunk) == params.psiChunkSize)
 		{
-			if (ridx != 0)
-			{
-				clear(chunk);
-				ridx = 0;
-			}
-			std::size_t read_count = 0;
-			do
-			{
-				fastq = nullptr;
-				while (fastq == nullptr && !readFastqsQueue.try_dequeue(fastq))
-				{
-					bool tryBreaking = readStreamingFinished;
-					if (!readFastqsQueue.try_dequeue(fastq) && tryBreaking) break;
-					std::this_thread::sleep_for(std::chrono::milliseconds(10));
-				}
-				if (fastq == nullptr) break;
-				if (seeder.mode != Seeder::Mode::Psi) break;
-				appendValue(chunk.name, fastq->seq_id);
-				appendValue(chunk.str, fastq->sequence);
-				++read_count;
-			} while (read_count != params.psiChunkSize);
-			if (seeder.mode == Seeder::Mode::Psi)
-			{
-				if (empty(chunk)) break;
+			assert(params.psiChunkSize != 0);
+			rid = length(chunk) + 1;
+		}
+
+		if (rid)
+		{
+			if (rid == length(chunk) + 1) {
+				assert(chunk_seeds.empty());
 				++nof_chunks;
 				auto timeStart = std::chrono::system_clock::now();
 				chunk_seeds = seeder.getSeeds(chunk, seeds, traverser, params);
@@ -480,15 +478,35 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 				size_t time = std::chrono::duration_cast<std::chrono::milliseconds>(timeEnd - timeStart).count();
 				coutoutput << "Chunk " << nof_chunks << " seeding took " << time << "ms" << BufferedWriter::Flush;
 			}
-			else if (fastq == nullptr) break;
+			else if (rid == 1)
+			{
+				clear(chunk);
+				rid = 0;
+				continue;
+			}
+			--rid;
+			fastq = std::make_shared<FastQ>();
+			fastq->seq_id = toCString(chunk.name[rid-1]);
+			fastq->sequence = toCString(seqan::String<char, seqan::CStyle>(chunk.str[rid-1]));
+			//getQualities(cur_read.quality, chunk.str[rid-1]);
+			chunk_seeds.back().swap(hits);
+			chunk_seeds.pop_back();
+		}
+		else
+		{
+			while (fastq == nullptr && !readFastqsQueue.try_dequeue(fastq))
+			{
+				bool tryBreaking = readStreamingFinished;
+				if (!readFastqsQueue.try_dequeue(fastq) && tryBreaking) break;
+				std::this_thread::sleep_for(std::chrono::milliseconds(10));
+			}
 		}
 
-		if (seeder.mode == Seeder::Mode::Psi)
+		if (fastq == nullptr)
 		{
-			fastq = std::make_shared<FastQ>();
-			fastq->seq_id = toCString(chunk.name[ridx]);
-			fastq->sequence = toCString(seqan::String<char, seqan::CStyle>(chunk.str[ridx]));
-			//getQualities(cur_read.quality, chunk.str[ridx]);
+			if (seeder.mode != Seeder::Mode::Psi || empty(chunk)) break;
+			else rid = length(chunk) + 1;
+			continue;
 		}
 
 		assertSetNoRead(fastq->seq_id);
@@ -505,9 +523,23 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 		{
 			if (seeder.mode == Seeder::Mode::Psi)
 			{
-				std::vector<SeedHit>& seeds = chunk_seeds[ridx];
-				stats.seeds += seeds.size();
-				if (seeds.size() == 0)
+				if (!rid)
+				{
+					auto timeStart = std::chrono::system_clock::now();
+					hits = seeder.getSeeds(fastq->seq_id, fastq->sequence);
+					auto timeEnd = std::chrono::system_clock::now();
+					size_t time = std::chrono::duration_cast<std::chrono::milliseconds>(timeEnd - timeStart).count();
+					coutoutput << "Read " << fastq->seq_id << " seeding took " << time << "ms" << BufferedWriter::Flush;
+					if (hits.empty())
+					{
+						appendValue(chunk.name, fastq->seq_id);
+						appendValue(chunk.str, fastq->sequence);
+						coutoutput << "Read " << fastq->seq_id << " added to the current chunk for traversal" << BufferedWriter::Flush;
+						cerroutput << "Read " << fastq->seq_id << " added to the current chunk for traversal" << BufferedWriter::Flush;
+					}
+				}
+				stats.seeds += hits.size();
+				if (hits.size() == 0)
 				{
 					coutoutput << "Read " << fastq->seq_id << " has no seed hits" << BufferedWriter::Flush;
 					cerroutput << "Read " << fastq->seq_id << " has no seed hits" << BufferedWriter::Flush;
@@ -515,13 +547,13 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 					cerroutput << "Read " << fastq->seq_id << " alignment failed" << BufferedWriter::Flush;
 					continue;
 				}
-				stats.seedsFound += seeds.size();
+				stats.seedsFound += hits.size();
 				stats.readsWithASeed += 1;
 				stats.bpInReadsWithASeed += fastq->sequence.size();
 				auto clusterTimeStart = std::chrono::system_clock::now();
 				{
 					[[maybe_unused]] auto timer = seeder.psiSeeder->get_stats().timeit_ts("seed-cluster");
-					OrderSeeds(alignmentGraph, seeds);
+					OrderSeeds(alignmentGraph, hits);
 				}
 				auto clusterTimeEnd = std::chrono::system_clock::now();
 				size_t clusterTime = std::chrono::duration_cast<std::chrono::milliseconds>(clusterTimeEnd - clusterTimeStart).count();
@@ -529,7 +561,7 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 				auto alntimeStart = std::chrono::system_clock::now();
 				{
 					[[maybe_unused]] auto timer = seeder.psiSeeder->get_stats().timeit_ts("seed-extend");
-					alignments = AlignOneWay(alignmentGraph, fastq->seq_id, fastq->sequence, params.initialBandwidth, params.rampBandwidth, params.maxCellsPerSlice, !params.verboseMode, !params.tryAllSeeds, seeds, reusableState, !params.highMemory, params.forceGlobal, params.preciseClipping, params.seedClusterMinSize, params.seedExtendDensity, params.nondeterministicOptimizations);
+					alignments = AlignOneWay(alignmentGraph, fastq->seq_id, fastq->sequence, params.initialBandwidth, params.rampBandwidth, params.maxCellsPerSlice, !params.verboseMode, !params.tryAllSeeds, hits, reusableState, !params.highMemory, params.forceGlobal, params.preciseClipping, params.seedClusterMinSize, params.seedExtendDensity, params.nondeterministicOptimizations);
 				}
 				auto alntimeEnd = std::chrono::system_clock::now();
 				alntimems = std::chrono::duration_cast<std::chrono::milliseconds>(alntimeEnd - alntimeStart).count();
@@ -537,12 +569,12 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 			else if (seeder.mode != Seeder::Mode::None)
 			{
 				auto timeStart = std::chrono::system_clock::now();
-				std::vector<SeedHit> seeds = seeder.getSeeds(fastq->seq_id, fastq->sequence);
+				std::vector<SeedHit> hits = seeder.getSeeds(fastq->seq_id, fastq->sequence);
 				auto timeEnd = std::chrono::system_clock::now();
 				size_t time = std::chrono::duration_cast<std::chrono::milliseconds>(timeEnd - timeStart).count();
 				coutoutput << "Read " << fastq->seq_id << " seeding took " << time << "ms" << BufferedWriter::Flush;
-				stats.seeds += seeds.size();
-				if (seeds.size() == 0)
+				stats.seeds += hits.size();
+				if (hits.size() == 0)
 				{
 					coutoutput << "Read " << fastq->seq_id << " has no seed hits" << BufferedWriter::Flush;
 					cerroutput << "Read " << fastq->seq_id << " has no seed hits" << BufferedWriter::Flush;
@@ -551,16 +583,16 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 					if (params.outputCorrectedFile != "") writeCorrectedToQueue(correctedToken, params, fastq->seq_id, fastq->sequence, alignmentGraph.getDBGoverlap(), correctedOut, alignments);
 					continue;
 				}
-				stats.seedsFound += seeds.size();
+				stats.seedsFound += hits.size();
 				stats.readsWithASeed += 1;
 				stats.bpInReadsWithASeed += fastq->sequence.size();
 				auto clusterTimeStart = std::chrono::system_clock::now();
-				OrderSeeds(alignmentGraph, seeds);
+				OrderSeeds(alignmentGraph, hits);
 				auto clusterTimeEnd = std::chrono::system_clock::now();
 				size_t clusterTime = std::chrono::duration_cast<std::chrono::milliseconds>(clusterTimeEnd - clusterTimeStart).count();
 				coutoutput << "Read " << fastq->seq_id << " clustering took " << clusterTime << "ms" << BufferedWriter::Flush;
 				auto alntimeStart = std::chrono::system_clock::now();
-				alignments = AlignOneWay(alignmentGraph, fastq->seq_id, fastq->sequence, params.initialBandwidth, params.rampBandwidth, params.maxCellsPerSlice, !params.verboseMode, !params.tryAllSeeds, seeds, reusableState, !params.highMemory, params.forceGlobal, params.preciseClipping, params.seedClusterMinSize, params.seedExtendDensity, params.nondeterministicOptimizations);
+				alignments = AlignOneWay(alignmentGraph, fastq->seq_id, fastq->sequence, params.initialBandwidth, params.rampBandwidth, params.maxCellsPerSlice, !params.verboseMode, !params.tryAllSeeds, hits, reusableState, !params.highMemory, params.forceGlobal, params.preciseClipping, params.seedClusterMinSize, params.seedExtendDensity, params.nondeterministicOptimizations);
 				auto alntimeEnd = std::chrono::system_clock::now();
 				alntimems = std::chrono::duration_cast<std::chrono::milliseconds>(alntimeEnd - alntimeStart).count();
 			}
