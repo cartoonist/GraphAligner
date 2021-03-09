@@ -448,6 +448,7 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 	auto seeds = seeder.psiSeeder->create_readrecord();
 	auto traverser = seeder.psiSeeder->create_traverser();
 	auto nof_chunks = 0;
+	std::shared_ptr<AlignmentResult> alignments = std::make_shared<AlignmentResult>();
 	std::vector<std::vector<SeedHit>> chunk_seeds;
 
 	std::size_t rid = 0;  /* rid=1..|chunk| -> processing; rid=0 -> stop; rid=|chunk|+1 -> start */
@@ -515,8 +516,6 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 		stats.reads += 1;
 		stats.bpInReads += fastq->sequence.size();
 
-		AlignmentResult alignments;
-
 		size_t alntimems = 0;
 		size_t clustertimems = 0;
 		try
@@ -561,7 +560,7 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 				auto alntimeStart = std::chrono::system_clock::now();
 				{
 					[[maybe_unused]] auto timer = seeder.psiSeeder->get_stats().timeit_ts("seed-extend");
-					alignments = AlignOneWay(alignmentGraph, fastq->seq_id, fastq->sequence, params.initialBandwidth, params.rampBandwidth, params.maxCellsPerSlice, !params.verboseMode, !params.tryAllSeeds, hits, reusableState, !params.highMemory, params.forceGlobal, params.preciseClipping, params.seedClusterMinSize, params.seedExtendDensity, params.nondeterministicOptimizations);
+					*alignments = AlignOneWay(alignmentGraph, fastq->seq_id, fastq->sequence, params.initialBandwidth, params.rampBandwidth, params.maxCellsPerSlice, !params.verboseMode, !params.tryAllSeeds, hits, reusableState, !params.highMemory, params.forceGlobal, params.preciseClipping, params.seedClusterMinSize, params.seedExtendDensity, params.nondeterministicOptimizations);
 				}
 				auto alntimeEnd = std::chrono::system_clock::now();
 				alntimems = std::chrono::duration_cast<std::chrono::milliseconds>(alntimeEnd - alntimeStart).count();
@@ -580,7 +579,7 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 					cerroutput << "Read " << fastq->seq_id << " has no seed hits" << BufferedWriter::Flush;
 					coutoutput << "Read " << fastq->seq_id << " alignment failed" << BufferedWriter::Flush;
 					cerroutput << "Read " << fastq->seq_id << " alignment failed" << BufferedWriter::Flush;
-					if (params.outputCorrectedFile != "") writeCorrectedToQueue(correctedToken, params, fastq->seq_id, fastq->sequence, alignmentGraph.getDBGoverlap(), correctedOut, alignments);
+					if (params.outputCorrectedFile != "") writeCorrectedToQueue(correctedToken, params, fastq->seq_id, fastq->sequence, alignmentGraph.getDBGoverlap(), correctedOut, *alignments);
 					continue;
 				}
 				stats.seedsFound += hits.size();
@@ -592,21 +591,21 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 				size_t clusterTime = std::chrono::duration_cast<std::chrono::milliseconds>(clusterTimeEnd - clusterTimeStart).count();
 				coutoutput << "Read " << fastq->seq_id << " clustering took " << clusterTime << "ms" << BufferedWriter::Flush;
 				auto alntimeStart = std::chrono::system_clock::now();
-				alignments = AlignOneWay(alignmentGraph, fastq->seq_id, fastq->sequence, params.initialBandwidth, params.rampBandwidth, params.maxCellsPerSlice, !params.verboseMode, !params.tryAllSeeds, hits, reusableState, !params.highMemory, params.forceGlobal, params.preciseClipping, params.seedClusterMinSize, params.seedExtendDensity, params.nondeterministicOptimizations);
+				*alignments = AlignOneWay(alignmentGraph, fastq->seq_id, fastq->sequence, params.initialBandwidth, params.rampBandwidth, params.maxCellsPerSlice, !params.verboseMode, !params.tryAllSeeds, hits, reusableState, !params.highMemory, params.forceGlobal, params.preciseClipping, params.seedClusterMinSize, params.seedExtendDensity, params.nondeterministicOptimizations);
 				auto alntimeEnd = std::chrono::system_clock::now();
 				alntimems = std::chrono::duration_cast<std::chrono::milliseconds>(alntimeEnd - alntimeStart).count();
 			}
 			else if (params.optimalDijkstra)
 			{
 				auto alntimeStart = std::chrono::system_clock::now();
-				alignments = AlignOneWayDijkstra(alignmentGraph, fastq->seq_id, fastq->sequence, !params.verboseMode, reusableState, params.forceGlobal, params.preciseClipping);
+				*alignments = AlignOneWayDijkstra(alignmentGraph, fastq->seq_id, fastq->sequence, !params.verboseMode, reusableState, params.forceGlobal, params.preciseClipping);
 				auto alntimeEnd = std::chrono::system_clock::now();
 				alntimems = std::chrono::duration_cast<std::chrono::milliseconds>(alntimeEnd - alntimeStart).count();
 			}
 			else
 			{
 				auto alntimeStart = std::chrono::system_clock::now();
-				alignments = AlignOneWay(alignmentGraph, fastq->seq_id, fastq->sequence, params.initialBandwidth, params.rampBandwidth, !params.verboseMode, reusableState, !params.highMemory, params.forceGlobal, params.preciseClipping, params.nondeterministicOptimizations);
+				*alignments = AlignOneWay(alignmentGraph, fastq->seq_id, fastq->sequence, params.initialBandwidth, params.rampBandwidth, !params.verboseMode, reusableState, !params.highMemory, params.forceGlobal, params.preciseClipping, params.nondeterministicOptimizations);
 				auto alntimeEnd = std::chrono::system_clock::now();
 				alntimems = std::chrono::duration_cast<std::chrono::milliseconds>(alntimeEnd - alntimeStart).count();
 			}
@@ -620,19 +619,19 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 			continue;
 		}
 
-		stats.allAlignmentsCount += alignments.alignments.size();
+		stats.allAlignmentsCount += alignments->alignments.size();
 
 		coutoutput << "Read " << fastq->seq_id << " alignment took " << alntimems << "ms" << BufferedWriter::Flush;
-		if (alignments.alignments.size() > 0) alignments.alignments = AlignmentSelection::SelectAlignments(alignments.alignments, selectionOptions);
+		if (alignments->alignments.size() > 0) alignments->alignments = AlignmentSelection::SelectAlignments(alignments->alignments, selectionOptions);
 
 		//failed alignment, don't output
-		if (alignments.alignments.size() == 0)
+		if (alignments->alignments.size() == 0)
 		{
 			coutoutput << "Read " << fastq->seq_id << " alignment failed" << BufferedWriter::Flush;
 			cerroutput << "Read " << fastq->seq_id << " alignment failed" << BufferedWriter::Flush;
 			try
 			{
-				if (params.outputCorrectedFile != "") writeCorrectedToQueue(correctedToken, params, fastq->seq_id, fastq->sequence, alignmentGraph.getDBGoverlap(), correctedOut, alignments);
+				if (params.outputCorrectedFile != "") writeCorrectedToQueue(correctedToken, params, fastq->seq_id, fastq->sequence, alignmentGraph.getDBGoverlap(), correctedOut, *alignments);
 			}
 			catch (const ThreadReadAssertion::AssertionFailure& a)
 			{
@@ -643,50 +642,50 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 			continue;
 		}
 
-		stats.seedsExtended += alignments.seedsExtended;
+		stats.seedsExtended += alignments->seedsExtended;
 		stats.readsWithAnAlignment += 1;
 
 		size_t totalcells = 0;
-		for (size_t i = 0; i < alignments.alignments.size(); i++)
+		for (size_t i = 0; i < alignments->alignments.size(); i++)
 		{
-			totalcells += alignments.alignments[i].cellsProcessed;
+			totalcells += alignments->alignments[i].cellsProcessed;
 		}
 		
-		std::sort(alignments.alignments.begin(), alignments.alignments.end(), [](const AlignmentResult::AlignmentItem& left, const AlignmentResult::AlignmentItem& right) { return left.alignmentStart < right.alignmentStart; });
+		std::sort(alignments->alignments.begin(), alignments->alignments.end(), [](const AlignmentResult::AlignmentItem& left, const AlignmentResult::AlignmentItem& right) { return left.alignmentStart < right.alignmentStart; });
 
 		if (params.outputGAMFile != "" || params.outputJSONFile != "")
 		{
-			for (size_t i = 0; i < alignments.alignments.size(); i++)
+			for (size_t i = 0; i < alignments->alignments.size(); i++)
 			{
-				AddAlignment(fastq->seq_id, fastq->sequence, alignments.alignments[i]);
-				replaceDigraphNodeIdsWithOriginalNodeIds(*alignments.alignments[i].alignment, alignmentGraph);
+				AddAlignment(fastq->seq_id, fastq->sequence, alignments->alignments[i]);
+				replaceDigraphNodeIdsWithOriginalNodeIds(*alignments->alignments[i].alignment, alignmentGraph);
 			}
 		}
 
 		if (params.outputGAFFile != "")
 		{
-			for (size_t i = 0; i < alignments.alignments.size(); i++)
+			for (size_t i = 0; i < alignments->alignments.size(); i++)
 			{
-				AddGAFLine(alignmentGraph, fastq->seq_id, fastq->sequence, alignments.alignments[i]);
+				AddGAFLine(alignmentGraph, fastq->seq_id, fastq->sequence, alignments->alignments[i]);
 			}
 		}
 		
-		std::sort(alignments.alignments.begin(), alignments.alignments.end(), [](const AlignmentResult::AlignmentItem& left, const AlignmentResult::AlignmentItem& right) { return left.alignmentStart < right.alignmentStart; });
+		std::sort(alignments->alignments.begin(), alignments->alignments.end(), [](const AlignmentResult::AlignmentItem& left, const AlignmentResult::AlignmentItem& right) { return left.alignmentStart < right.alignmentStart; });
 
 		std::string alignmentpositions;
 
-		for (size_t i = 0; i < alignments.alignments.size(); i++)
+		for (size_t i = 0; i < alignments->alignments.size(); i++)
 		{
 			stats.alignments += 1;
-			size_t alignmentSize = alignments.alignments[i].alignmentEnd - alignments.alignments[i].alignmentStart;
+			size_t alignmentSize = alignments->alignments[i].alignmentEnd - alignments->alignments[i].alignmentStart;
 			if (alignmentSize == fastq->sequence.size())
 			{
 				stats.fullLengthAlignments += 1;
 				stats.bpInFullAlignments += alignmentSize;
 			}
 			stats.bpInAlignments += alignmentSize;
-			if (params.outputCorrectedFile != "" || params.outputCorrectedClippedFile != "") AddCorrected(alignments.alignments[i]);
-			alignmentpositions += std::to_string(alignments.alignments[i].alignmentStart) + "-" + std::to_string(alignments.alignments[i].alignmentEnd) + ", ";
+			if (params.outputCorrectedFile != "" || params.outputCorrectedClippedFile != "") AddCorrected(alignments->alignments[i]);
+			alignmentpositions += std::to_string(alignments->alignments[i].alignmentStart) + "-" + std::to_string(alignments->alignments[i].alignmentEnd) + ", ";
 		}
 
 		alignmentpositions.pop_back();
@@ -695,11 +694,11 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 
 		try
 		{
-			if (params.outputGAMFile != "") writeGAMToQueue(GAMToken, params, GAMOut, alignments);
-			if (params.outputJSONFile != "") writeJSONToQueue(JSONToken, params, JSONOut, alignments);
-			if (params.outputGAFFile != "") writeGAFToQueue(GAFToken, params, GAFOut, alignments);
-			if (params.outputCorrectedFile != "") writeCorrectedToQueue(correctedToken, params, fastq->seq_id, fastq->sequence, alignmentGraph.getDBGoverlap(), correctedOut, alignments);
-			if (params.outputCorrectedClippedFile != "") writeCorrectedClippedToQueue(clippedToken, params, correctedClippedOut, alignments);
+			if (params.outputGAMFile != "") writeGAMToQueue(GAMToken, params, GAMOut, *alignments);
+			if (params.outputJSONFile != "") writeJSONToQueue(JSONToken, params, JSONOut, *alignments);
+			if (params.outputGAFFile != "") writeGAFToQueue(GAFToken, params, GAFOut, *alignments);
+			if (params.outputCorrectedFile != "") writeCorrectedToQueue(correctedToken, params, fastq->seq_id, fastq->sequence, alignmentGraph.getDBGoverlap(), correctedOut, *alignments);
+			if (params.outputCorrectedClippedFile != "") writeCorrectedClippedToQueue(clippedToken, params, correctedClippedOut, *alignments);
 		}
 		catch (const ThreadReadAssertion::AssertionFailure& a)
 		{
