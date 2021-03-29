@@ -14,6 +14,8 @@ struct AlignerParams
 	size_t numThreads;
 	size_t initialBandwidth;
 	size_t rampBandwidth;
+	size_t readMinInsertSize;
+	size_t readMaxInsertSize;
 	int dynamicRowStart;
 	size_t maxCellsPerSlice;
 	std::vector<std::string> seedFiles;
@@ -50,9 +52,112 @@ struct AlignerParams
 	double seedExtendDensity;
 	bool nondeterministicOptimizations;
 	bool optimalDijkstra;
+	bool interleaved;
 };
 
-void alignReads(AlignerParams params);
+/* tags */
+struct SingleEnd {};
+struct PairedEnd {};
+
+/* queue entry wrapper class */
+template<typename TSpec, typename TValue>
+struct Entry;
+
+/* queue entry wrapper class specialised for SingleEnd reads */
+template<typename TValue>
+struct Entry<SingleEnd, TValue> {
+	using end_type = std::shared_ptr<TValue>;
+	using type = end_type;
+
+	static inline end_type&
+	getNullEnd()
+	{
+		static end_type null_end = nullptr;
+		return null_end;
+	}
+};
+
+template<typename TValue>
+inline std::shared_ptr<TValue>&
+getOneEnd(std::shared_ptr<TValue>& entry)
+{
+	return entry;
+}
+
+template<typename TValue>
+inline std::shared_ptr<TValue>&
+getOtherEnd(std::shared_ptr<TValue>& entry)
+{
+	return Entry<SingleEnd, TValue>::getNullEnd();
+}
+
+template<typename TValue>
+inline bool
+isEmpty(std::shared_ptr<TValue>& entry)
+{
+	return entry == nullptr;
+}
+
+template<typename TValue>
+inline void
+clear(std::shared_ptr<TValue>& entry)
+{
+	entry = nullptr;
+}
+
+template<typename TValue>
+constexpr inline bool
+isSingle(std::shared_ptr<TValue>& entry)
+{
+	return true;
+}
+
+/* queue entry wrapper class specialised for PairedEnd reads */
+template<typename TValue>
+struct Entry<PairedEnd, TValue> {
+	using end_type = std::shared_ptr<TValue>;
+	using type = std::pair<end_type, end_type>;
+};
+
+template<typename TValue>
+inline std::shared_ptr<TValue>&
+getOneEnd(std::pair<std::shared_ptr<TValue>, std::shared_ptr<TValue>>& entry)
+{
+	return entry.first;
+}
+
+template<typename TValue>
+inline std::shared_ptr<TValue>&
+getOtherEnd(std::pair<std::shared_ptr<TValue>, std::shared_ptr<TValue>>& entry)
+{
+	return entry.second;
+}
+
+template<typename TValue>
+inline bool
+isEmpty(std::pair<std::shared_ptr<TValue>, std::shared_ptr<TValue>>& entry)
+{
+	return entry.first == nullptr;
+}
+
+template<typename TValue>
+inline void
+clear(std::pair<std::shared_ptr<TValue>, std::shared_ptr<TValue>>& entry)
+{
+	entry.first = nullptr;
+	entry.second = nullptr;
+}
+
+template<typename TValue>
+constexpr inline bool
+isSingle(std::pair<std::shared_ptr<TValue>, std::shared_ptr<TValue>>& entry)
+{
+	return false;
+}
+
+template<typename TSpec = SingleEnd>
+void alignReads(AlignerParams params, TSpec=TSpec{});
+
 void replaceDigraphNodeIdsWithOriginalNodeIds(vg::Alignment& alignment, const AlignmentGraph& graph);
 
 #endif

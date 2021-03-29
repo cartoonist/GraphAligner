@@ -58,6 +58,7 @@ int main(int argc, char** argv)
 		("try-all-seeds", "don't use heuristics to discard seed hits")
 		("global-alignment", "force the read to be aligned end-to-end even if the alignment score is poor")
 		("optimal-alignment", "calculate the optimal alignment (VERY SLOW)")
+		("interleaved,i", "consider input reads as interleaved paired-ended")
 	;
 	boost::program_options::options_description seeding("Seeding");
 	seeding.add_options()
@@ -87,6 +88,8 @@ int main(int argc, char** argv)
 		("ramp-bandwidth,B", boost::program_options::value<size_t>(), "ramp bandwidth (int)")
 		("tangle-effort,C", boost::program_options::value<size_t>(), "tangle effort limit, higher results in slower but more accurate alignments (int) (-1 for unlimited)")
 		("high-memory", "use slightly less CPU but a lot more memory")
+		("min-insert-size,d", boost::program_options::value<size_t>(), "minimum read insert size in paired-end mode (int)")
+		("max-insert-size,D", boost::program_options::value<size_t>(), "maximum read insert size in paired-end mode (int)")
 	;
 	boost::program_options::options_description hidden("hidden");
 	hidden.add_options()
@@ -138,13 +141,15 @@ int main(int argc, char** argv)
 	params.numThreads = 1;
 	params.initialBandwidth = 0;
 	params.rampBandwidth = 0;
+	params.readMinInsertSize = 0;
+	params.readMaxInsertSize = 0;
 	params.dynamicRowStart = 0;
 	params.maxCellsPerSlice = std::numeric_limits<decltype(params.maxCellsPerSlice)>::max();
 	params.verboseMode = false;
 	params.tryAllSeeds = false;
 	params.highMemory = false;
 	params.psiLength = 0;
-	params.psiChunkSize = 0;
+	params.psiChunkSize = 1000000;
 	params.psiDistance = 0;
 	params.psiPathCount = 0;
 	params.psiContext = 0;
@@ -168,6 +173,7 @@ int main(int argc, char** argv)
 	params.seedExtendDensity = 0.002;
 	params.nondeterministicOptimizations = false;
 	params.optimalDijkstra = false;
+	params.interleaved = false;
 
 	std::vector<std::string> outputAlns;
 	bool paramError = false;
@@ -233,6 +239,8 @@ int main(int argc, char** argv)
 
 	if (vm.count("extra-heuristic")) params.nondeterministicOptimizations = true;
 	if (vm.count("ramp-bandwidth")) params.rampBandwidth = vm["ramp-bandwidth"].as<size_t>();
+	if (vm.count("min-insert-size")) params.readMinInsertSize = vm["min-insert-size"].as<size_t>();
+	if (vm.count("max-insert-size")) params.readMaxInsertSize = vm["max-insert-size"].as<size_t>();
 	if (vm.count("tangle-effort")) params.maxCellsPerSlice = vm["tangle-effort"].as<size_t>();
 	if (vm.count("verbose")) params.verboseMode = true;
 	if (vm.count("try-all-seeds")) params.tryAllSeeds = true;
@@ -280,6 +288,7 @@ int main(int argc, char** argv)
 	if (vm.count("global-alignment")) params.forceGlobal = true;
 	if (vm.count("precise-clipping")) params.preciseClipping = true;
 	if (vm.count("optimal-alignment")) params.optimalDijkstra = true;
+	if (vm.count("interleaved")) params.interleaved = true;
 
 	if (params.graphFile == "")
 	{
@@ -346,9 +355,28 @@ int main(int argc, char** argv)
 		std::cerr << "ramp bandwidth must be higher than default bandwidth" << std::endl;
 		paramError = true;
 	}
+	if (params.psiChunkSize == 0)
+	{
+		std::cerr << "psiChunkSize must be >= 1" << std::endl;
+		paramError = true;
+	}
 	if (params.psiDistance == 0)
 	{
 		params.psiDistance = params.psiLength;
+	}
+	if (params.interleaved && params.readMinInsertSize == 0)
+	{
+		std::cerr << "the distance between two ends cannot be zero" << std::endl;
+		paramError = true;
+	}
+	if (params.readMaxInsertSize == 0)
+	{
+		params.readMaxInsertSize = params.readMinInsertSize;
+	}
+	if (params.readMinInsertSize != 0)
+	{
+		params.alignmentSelectionMethod = AlignmentSelection::SelectionMethod::All;
+		resultSelectionMethods += 1;
 	}
 	if (params.mxmLength < 2)
 	{
@@ -437,7 +465,12 @@ int main(int argc, char** argv)
 
 	omp_set_num_threads(params.numThreads);
 
-	alignReads(params);
+	if ( params.interleaved ) {
+		alignReads(params, PairedEnd());
+	}
+	else {
+		alignReads(params, SingleEnd());
+	}
 
 	return 0;
 }

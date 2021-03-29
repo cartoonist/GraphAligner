@@ -1,11 +1,14 @@
 GPP=$(CXX)
-CPPFLAGS=-Wall -Wextra -std=c++17 -O3 -g ${MACROS} -Iconcurrentqueue -IBBHash -Izstr/src -Iparallel-hashmap/parallel_hashmap/ `pkg-config --cflags protobuf` `pkg-config --cflags mummer` `pkg-config --cflags psi` -USEQAN_HAS_ZLIB -USEQAN_HAS_BZIP2 -fopenmp -Wno-unused-parameter
+KOKKOS_HOME ?= ../psi/ext/PairG/ext/kokkos
+KOKKOSKERNELS_HOME ?= ../psi/ext/PairG/ext/kokkos-kernels
+KOKKOSKERNELS_PREFIX ?= ${HOME}/.local/include/kokkos-kernels
+CPPFLAGS=-Wall -Wextra -std=c++17 -O3 -g ${MACROS} -DKOKKOS_DEPENDENCE -Iconcurrentqueue -IBBHash -Izstr/src -Iparallel-hashmap/parallel_hashmap/ `pkg-config --cflags protobuf` `pkg-config --cflags mummer` `pkg-config --cflags psi` -USEQAN_HAS_ZLIB -USEQAN_HAS_BZIP2 -fopenmp -Wno-unused-parameter -I${KOKKOS_HOME} -I${KOKKOS_HOME}/core/src -I${KOKKOS_HOME}/containers/src -I${KOKKOS_HOME}/algorithms/src -I${KOKKOSKERNELS_HOME}/src -I${KOKKOSKERNELS_HOME}/src/impl -I${KOKKOSKERNELS_HOME}/src/impl/tpls -I${KOKKOSKERNELS_HOME}/src/blas -I${KOKKOSKERNELS_HOME}/src/blas/impl -I${KOKKOSKERNELS_HOME}/src/sparse -I${KOKKOSKERNELS_HOME}/src/sparse/impl -I${KOKKOSKERNELS_HOME}/src/blas/impl -I${KOKKOSKERNELS_HOME}/src/graph -I${KOKKOSKERNELS_HOME}/src/graph/impl -I${KOKKOSKERNELS_HOME}/src/batched -I${KOKKOSKERNELS_HOME}/src/common -I${KOKKOSKERNELS_PREFIX}
 
 ODIR=obj
 BINDIR=bin
 SRCDIR=src
 
-LIBS=-lm -lz -lboost_serialization -lboost_program_options `pkg-config --libs mummer` `pkg-config --libs protobuf` `pkg-config --libs psi` -lvgio -lsdsl
+LIBS=-lm -lz -lboost_serialization -lboost_program_options `pkg-config --libs mummer` `pkg-config --libs protobuf` `pkg-config --libs psi` -lhandlegraph -lbdsg -lvgio -lsdsl -lkokkoskernels -lkokkoscontainers -lkokkoscore
 JEMALLOCFLAGS= -L`jemalloc-config --libdir` -Wl,-rpath,`jemalloc-config --libdir` -ljemalloc -Wl,-Bdynamic `jemalloc-config --libs`
 
 _DEPS = vg.pb.h fastqloader.h GraphAlignerWrapper.h vg.pb.h BigraphToDigraph.h stream.hpp Aligner.h ThreadReadAssertion.h AlignmentGraph.h CommonUtils.h GfaGraph.h AlignmentCorrectnessEstimation.h MummerSeeder.h ReadCorrection.h MinimizerSeeder.h AlignmentSelection.h

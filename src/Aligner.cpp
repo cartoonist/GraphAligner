@@ -3,6 +3,7 @@
 #include <fstream>
 #include <functional>
 #include <algorithm>
+#include <utility>
 #include <thread>
 #include <csignal>
 #include <concurrentqueue.h> //https://github.com/cameron314/concurrentqueue
@@ -109,19 +110,43 @@ struct Seeder
 			}
 		}
 	}
+	/**
+	 *  @brief  Verify the distance between two alignments of a paired-end read.
+	 *
+	 *  @params aln1 the first alignment
+	 *  @params aln2 the second alignment
+	 *  @return `true` if they meet the distance constraints; i.e. there is a path of the
+	 *  length in the range [m, M], where m and M is minimum and maximum insert size
+	 *  respectively. Otherwise, it returns `false`.
+	 *
+	 *  NOTE: This function assumes that the input reads are forward-reversed.
+	 */
+	bool verifyDistance(AlignmentResult::AlignmentItem& aln1, AlignmentResult::AlignmentItem& aln2) const
+	{
+		auto fwd = aln1.trace->trace.back().DPposition;
+		auto bwd = aln2.trace->trace.back().DPposition;
+		if (fwd.node % 2 == 1) std::swap(fwd, bwd);
+		auto fwd_head_id = this->psiSeeder->get_graph_ptr()->id_by_coordinate(fwd.node / 2);
+		auto bwd_head_id = this->psiSeeder->get_graph_ptr()->id_by_coordinate(bwd.node / 2);
+		auto bwd_head_offset = this->psiSeeder->get_graph_ptr()->node_length(bwd_head_id) - bwd.nodeOffset - 1;
+		return psiSeeder->verify_distance(fwd_head_id, fwd.nodeOffset, bwd_head_id, bwd_head_offset);
+	}
 	std::vector<std::vector<SeedHit>> getSeeds(const psi::seeder_type::readsrecord_type& chunk, psi::seeder_type::readsrecord_type& seeds, psi::seeder_type::traverser_type& traverser, const AlignerParams& params) const
 	{
 		assert(mode == Mode::Psi);
-		std::vector<std::vector<SeedHit>> chunk_seeds(params.psiChunkSize);
+		std::vector<std::vector<SeedHit>> chunk_hits(params.psiChunkSize/2);
 		psiSeeder->get_seeds(seeds, chunk, params.psiDistance);
 		auto sindex = psiSeeder->index_reads(seeds);
 		auto callback =
-				[this, &chunk_seeds, &params](const auto& hit) {
+				[this, &chunk, &chunk_hits, &params](const auto& hit) {
 					auto id = this->psiSeeder->get_graph_ptr()->coordinate_id(hit.node_id);
-					chunk_seeds[hit.read_id].push_back(SeedHit(id, hit.node_offset, hit.read_offset, params.psiLength, params.psiLength, false));
+					bool reversed = hit.read_id % 2;
+					auto read_offset = (reversed ? length(chunk.str[hit.read_id]) - hit.read_offset - 1 : hit.read_offset);
+					auto node_offset = (reversed ? this->psiSeeder->get_graph_ptr()->node_length(hit.node_id) - hit.node_offset - 1 : hit.node_offset);
+					chunk_hits[hit.read_id/2].push_back(SeedHit(id, node_offset, read_offset, params.psiLength, params.psiLength, reversed));
 				};
 		psiSeeder->seeds_all(seeds, sindex, traverser, callback);
-		return chunk_seeds;
+		return chunk_hits;
 	}
 	std::vector<SeedHit> getSeeds(const std::string& seqName, const std::string& seq) const
 	{
@@ -144,12 +169,21 @@ struct Seeder
 				assert(psiSeeder != nullptr);
 				{
 					std::vector<SeedHit> hits;
-					auto callback =
+					auto callback_fwd =
 							[this, &hits](const auto& hit) {
 								auto id = this->psiSeeder->get_graph_ptr()->coordinate_id(hit.node_id);
 								hits.push_back(SeedHit(id, hit.node_offset, hit.read_offset, hit.match_len, (hit.match_len/hit.gocc+1), false));
 							};
-					psiSeeder->seeds_on_paths(seq, callback);
+					auto callback_rvs =
+							[this, &hits, seqlen=seq.size()](const auto& hit) {
+								auto id = this->psiSeeder->get_graph_ptr()->coordinate_id(hit.node_id);
+								auto read_offset = seqlen - hit.read_offset - 1;
+								auto node_offset = this->psiSeeder->get_graph_ptr()->node_length(hit.node_id) - hit.node_offset - 1;
+								hits.push_back(SeedHit(id, node_offset, read_offset, hit.match_len, (hit.match_len/hit.gocc+1), true));
+							};
+					psiSeeder->seeds_on_paths(seq, callback_fwd);
+					auto seq_rc = CommonUtils::ReverseComplement(seq);
+					psiSeeder->seeds_on_paths(seq_rc, callback_rvs);
 					return hits;
 				}
 			case Mode::None:
@@ -175,6 +209,7 @@ struct AlignmentStats
 	bpInAlignments(0),
 	bpInFullAlignments(0),
 	allAlignmentsCount(0),
+	nofChunks(0),
 	assertionBroke(false)
 	{
 	}
@@ -191,6 +226,7 @@ struct AlignmentStats
 	std::atomic<size_t> bpInAlignments;
 	std::atomic<size_t> bpInFullAlignments;
 	std::atomic<size_t> allAlignmentsCount;
+	std::atomic<size_t> nofChunks;
 	std::atomic<bool> assertionBroke;
 };
 
@@ -213,6 +249,39 @@ void replaceDigraphNodeIdsWithOriginalNodeIds(vg::Alignment& alignment, const Al
 			alignment.mutable_path()->mutable_mapping(i)->mutable_position()->set_name(name);
 		}
 	}
+}
+
+void readFastqs(const std::vector<std::string>& filenames, moodycamel::ConcurrentQueue<std::pair<std::shared_ptr<FastQ>, std::shared_ptr<FastQ>>>& writequeue, std::atomic<bool>& readStreamingFinished)
+{
+	assertSetNoRead("Paired-end read streamer");
+	std::pair<std::shared_ptr<FastQ>, std::shared_ptr<FastQ>> ends;
+	ends.first = nullptr;
+	for (auto filename : filenames)
+	{
+		assert(ends.first == nullptr);	// paired reads cannot be split across files
+		FastQ::streamFastqFromFile(filename, false, [&writequeue, &ends](FastQ& read)
+		{
+			if (ends.first == nullptr) {
+				ends.first = std::make_shared<FastQ>();
+				std::swap(*ends.first, read);
+				return;
+			}
+			else {
+				ends.second = std::make_shared<FastQ>();
+				std::swap(*ends.second, read);
+			}
+			size_t slept = 0;
+			while (writequeue.size_approx() > 200)
+			{
+				std::this_thread::sleep_for(std::chrono::milliseconds(10));
+				slept++;
+				if (slept > 100) break;
+			}
+			writequeue.enqueue(ends);
+			ends.first = nullptr;
+		});
+	}
+	readStreamingFinished = true;
 }
 
 void readFastqs(const std::vector<std::string>& filenames, moodycamel::ConcurrentQueue<std::shared_ptr<FastQ>>& writequeue, std::atomic<bool>& readStreamingFinished)
@@ -424,7 +493,8 @@ void writeCorrectedClippedToQueue(moodycamel::ProducerToken& token, const Aligne
 	QueueInsertSlowly(token, correctedClippedOut, strstr.str());
 }
 
-void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::ConcurrentQueue<std::shared_ptr<FastQ>>& readFastqsQueue, std::atomic<bool>& readStreamingFinished, int threadnum, const Seeder& seeder, AlignerParams params, moodycamel::ConcurrentQueue<std::string*>& GAMOut, moodycamel::ConcurrentQueue<std::string*>& JSONOut, moodycamel::ConcurrentQueue<std::string*>& GAFOut, moodycamel::ConcurrentQueue<std::string*>& correctedOut, moodycamel::ConcurrentQueue<std::string*>& correctedClippedOut, moodycamel::ConcurrentQueue<std::string*>& deallocqueue, AlignmentStats& stats)
+template<typename TEntry>
+void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::ConcurrentQueue<TEntry>& readFastqsQueue, std::atomic<bool>& readStreamingFinished, int threadnum, const Seeder& seeder, AlignerParams params, moodycamel::ConcurrentQueue<std::string*>& GAMOut, moodycamel::ConcurrentQueue<std::string*>& JSONOut, moodycamel::ConcurrentQueue<std::string*>& GAFOut, moodycamel::ConcurrentQueue<std::string*>& correctedOut, moodycamel::ConcurrentQueue<std::string*>& correctedClippedOut, moodycamel::ConcurrentQueue<std::string*>& deallocqueue, AlignmentStats& stats)
 {
 	moodycamel::ProducerToken GAMToken { GAMOut };
 	moodycamel::ProducerToken JSONToken { JSONOut };
@@ -444,12 +514,27 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 		cerroutput = {std::cerr};
 		coutoutput = {std::cout};
 	}
-	auto chunk = seeder.psiSeeder->create_readrecord();
-	auto seeds = seeder.psiSeeder->create_readrecord();
-	auto traverser = seeder.psiSeeder->create_traverser();
-	auto nof_chunks = 0;
+	psi::seeder_type::readsrecord_type chunk;
+	psi::seeder_type::readsrecord_type seeds;
+	psi::seeder_type::traverser_type traverser;
+	TEntry entry;
+	bool has_mate = true;
+	bool stash_next = false;
+	bool drop_pair = false;
 	std::shared_ptr<AlignmentResult> alignments = std::make_shared<AlignmentResult>();
-	std::vector<std::vector<SeedHit>> chunk_seeds;
+	std::shared_ptr<AlignmentResult> alns_1st = nullptr;
+	std::shared_ptr<AlignmentResult> alns_2nd = nullptr;
+	std::vector<std::vector<SeedHit>> chunk_hits;
+
+	if (seeder.mode == Seeder::Mode::Psi)
+	{
+		chunk = seeder.psiSeeder->create_readrecord();
+		seeds = seeder.psiSeeder->create_readrecord();
+		traverser = seeder.psiSeeder->create_traverser();
+
+		assert(params.psiChunkSize != 0);
+		params.psiChunkSize = (2 - isSingle(entry)) * params.psiChunkSize * 2 /* reverse complements */;
+	}
 
 	std::size_t rid = 0;  /* rid=1..|chunk| -> processing; rid=0 -> stop; rid=|chunk|+1 -> start */
 	while (true)
@@ -462,49 +547,85 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 		std::shared_ptr<FastQ> fastq = nullptr;
 		std::vector<SeedHit> hits;
 
+		/* If the chunk size is met, start mapping the chunk */
 		if (seeder.mode == Seeder::Mode::Psi && !rid && length(chunk) == params.psiChunkSize)
 		{
 			assert(params.psiChunkSize != 0);
 			rid = length(chunk) + 1;
 		}
 
+		/* Toggle `has_mate` if paired end, otherwise `false`. */
+		has_mate = !isSingle(entry) && !has_mate;
+
 		if (rid)
 		{
+			assert(!stash_next);
 			if (rid == length(chunk) + 1) {
-				assert(chunk_seeds.empty());
-				++nof_chunks;
+				assert(chunk_hits.empty());
 				auto timeStart = std::chrono::system_clock::now();
-				chunk_seeds = seeder.getSeeds(chunk, seeds, traverser, params);
+				chunk_hits = seeder.getSeeds(chunk, seeds, traverser, params);
 				auto timeEnd = std::chrono::system_clock::now();
 				size_t time = std::chrono::duration_cast<std::chrono::milliseconds>(timeEnd - timeStart).count();
-				coutoutput << "Chunk " << nof_chunks << " seeding took " << time << "ms" << BufferedWriter::Flush;
+				coutoutput << "Chunk " << ++stats.nofChunks << " seeding took " << time << "ms" << BufferedWriter::Flush;
 			}
 			else if (rid == 1)
 			{
 				clear(chunk);
 				rid = 0;
+				has_mate = true;
 				continue;
 			}
-			--rid;
+			rid -= 2;  /* NOTE: Also skips the reverse complement */
 			fastq = std::make_shared<FastQ>();
 			fastq->seq_id = toCString(chunk.name[rid-1]);
 			fastq->sequence = toCString(seqan::String<char, seqan::CStyle>(chunk.str[rid-1]));
 			//getQualities(cur_read.quality, chunk.str[rid-1]);
-			chunk_seeds.back().swap(hits);
-			chunk_seeds.pop_back();
+			chunk_hits.back().swap(hits);
+			chunk_hits.pop_back();
 		}
 		else
 		{
-			while (fastq == nullptr && !readFastqsQueue.try_dequeue(fastq))
+			fastq = getOtherEnd(entry);
+			if (!has_mate)
 			{
-				bool tryBreaking = readStreamingFinished;
-				if (!readFastqsQueue.try_dequeue(fastq) && tryBreaking) break;
-				std::this_thread::sleep_for(std::chrono::milliseconds(10));
+				assert(!stash_next);
+				assert(!drop_pair);
+				clear(entry);
+				while (isEmpty(entry) && !readFastqsQueue.try_dequeue(entry))
+				{
+					bool tryBreaking = readStreamingFinished;
+					if (!readFastqsQueue.try_dequeue(entry) && tryBreaking) break;
+					std::this_thread::sleep_for(std::chrono::milliseconds(10));
+				}
+				fastq = getOneEnd(entry);
 			}
+			else {
+				assert(fastq != nullptr);
+				if (stash_next)
+				{
+					assert(!drop_pair);
+					/* Append forward */
+					appendValue(chunk.name, fastq->seq_id);
+					appendValue(chunk.str, fastq->sequence);
+					/* Append reverse complement */
+					appendValue(chunk.name, fastq->seq_id);
+					appendValue(chunk.str, CommonUtils::ReverseComplement(fastq->sequence));
+					stash_next = false;
+					continue;
+				}
+			}
+		}
+
+		if (drop_pair)
+		{
+			drop_pair = false;
+			cerroutput << "Dropping read " << fastq->seq_id << " since its pair does not have any alignment" << BufferedWriter::Flush;
+			continue;
 		}
 
 		if (fastq == nullptr)
 		{
+			has_mate = true;
 			if (seeder.mode != Seeder::Mode::Psi || empty(chunk)) break;
 			else rid = length(chunk) + 1;
 			continue;
@@ -513,8 +634,6 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 		assertSetNoRead(fastq->seq_id);
 		coutoutput << "Read " << fastq->seq_id << " size " << fastq->sequence.size() << "bp" << BufferedWriter::Flush;
 		selectionOptions.readSize = fastq->sequence.size();
-		stats.reads += 1;
-		stats.bpInReads += fastq->sequence.size();
 
 		size_t alntimems = 0;
 		size_t clustertimems = 0;
@@ -531,8 +650,27 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 					coutoutput << "Read " << fastq->seq_id << " seeding took " << time << "ms" << BufferedWriter::Flush;
 					if (hits.empty())
 					{
+						/* Append forward */
 						appendValue(chunk.name, fastq->seq_id);
 						appendValue(chunk.str, fastq->sequence);
+						/* Append reverse complement */
+						appendValue(chunk.name, fastq->seq_id);
+						appendValue(chunk.str, CommonUtils::ReverseComplement(fastq->sequence));
+						if (!isSingle(entry))
+						{
+							if (!has_mate) stash_next = true;
+							else
+							{
+								auto mate_fastq = getOneEnd(entry);
+								/* Append forward */
+								appendValue(chunk.name, mate_fastq->seq_id);
+								appendValue(chunk.str, mate_fastq->sequence);
+								/* Append reverse complement */
+								appendValue(chunk.name, mate_fastq->seq_id);
+								appendValue(chunk.str, CommonUtils::ReverseComplement(mate_fastq->sequence));
+								alns_1st = nullptr;
+							}
+						}
 						coutoutput << "Read " << fastq->seq_id << " added to the current chunk for traversal" << BufferedWriter::Flush;
 						cerroutput << "Read " << fastq->seq_id << " added to the current chunk for traversal" << BufferedWriter::Flush;
 					}
@@ -619,6 +757,8 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 			continue;
 		}
 
+		stats.reads += 1;
+		stats.bpInReads += fastq->sequence.size();
 		stats.allAlignmentsCount += alignments->alignments.size();
 
 		coutoutput << "Read " << fastq->seq_id << " alignment took " << alntimems << "ms" << BufferedWriter::Flush;
@@ -639,6 +779,7 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 				stats.assertionBroke = true;
 				continue;
 			}
+			if (!isSingle(entry) && !has_mate) drop_pair = true;  // paired end and its mate is not aligned
 			continue;
 		}
 
@@ -653,58 +794,158 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 		
 		std::sort(alignments->alignments.begin(), alignments->alignments.end(), [](const AlignmentResult::AlignmentItem& left, const AlignmentResult::AlignmentItem& right) { return left.alignmentStart < right.alignmentStart; });
 
-		if (params.outputGAMFile != "" || params.outputJSONFile != "")
+		if (!isSingle(entry) && seeder.mode == Seeder::Mode::Psi) // paired end
 		{
-			for (size_t i = 0; i < alignments->alignments.size(); i++)
+			if (!has_mate)
 			{
-				AddAlignment(fastq->seq_id, fastq->sequence, alignments->alignments[i]);
-				replaceDigraphNodeIdsWithOriginalNodeIds(*alignments->alignments[i].alignment, alignmentGraph);
+				assert(alns_1st == nullptr);
+				alns_1st = alignments;
+				alignments = std::make_shared<AlignmentResult>();
+				continue;
 			}
-		}
+			/* else */
+			assert(alns_2nd == nullptr);
+			alns_2nd = alignments;
+			alignments = std::make_shared<AlignmentResult>();
 
-		if (params.outputGAFFile != "")
-		{
-			for (size_t i = 0; i < alignments->alignments.size(); i++)
+			std::vector<bool> added(alns_2nd->alignments.size(), 0);
+			bool all_ends_added = false;
+			for (size_t i = 0; i < alns_1st->alignments.size(); ++i)
 			{
-				AddGAFLine(alignmentGraph, fastq->seq_id, fastq->sequence, alignments->alignments[i]);
+				unsigned int matched = 0;
+				for (size_t j = 0; j < alns_2nd->alignments.size(); ++j)
+				{
+					if (seeder.verifyDistance(alns_1st->alignments[i], alns_2nd->alignments[j]))
+					{
+						++matched;
+						if (!added[j])
+						{
+							alignments->alignments.push_back(alns_2nd->alignments[j]);
+							auto fastq_2nd = getOtherEnd(entry);
+							size_t alignmentSize = alignments->alignments.back().alignmentEnd - alignments->alignments.back().alignmentStart;
+							if (alignmentSize == fastq_2nd->sequence.size())
+							{
+								stats.fullLengthAlignments += 1;
+								stats.bpInFullAlignments += alignmentSize;
+							}
+							stats.bpInAlignments += alignmentSize;
+							if (params.outputGAMFile != "" || params.outputJSONFile != "")
+							{
+								AddAlignment(fastq_2nd->seq_id, fastq_2nd->sequence, alignments->alignments.back());
+								replaceDigraphNodeIdsWithOriginalNodeIds(*alignments->alignments.back().alignment, alignmentGraph);
+							}
+							if (params.outputGAFFile != "")
+							{
+								AddGAFLine(alignmentGraph, fastq_2nd->seq_id, fastq_2nd->sequence, alignments->alignments.back());
+							}
+							added[j] = true;
+						}
+					}
+					if (matched && all_ends_added) break;
+				}
+				if (matched)
+				{
+					alignments->alignments.push_back(alns_1st->alignments[i]);
+					auto fastq_1st = getOneEnd(entry);
+					size_t alignmentSize = alignments->alignments.back().alignmentEnd - alignments->alignments.back().alignmentStart;
+					if (alignmentSize == fastq_1st->sequence.size())
+					{
+						stats.fullLengthAlignments += 1;
+						stats.bpInFullAlignments += alignmentSize;
+					}
+					stats.bpInAlignments += alignmentSize;
+					if (params.outputGAMFile != "" || params.outputJSONFile != "")
+					{
+						AddAlignment(fastq_1st->seq_id, fastq_1st->sequence, alignments->alignments.back());
+						replaceDigraphNodeIdsWithOriginalNodeIds(*alignments->alignments.back().alignment, alignmentGraph);
+					}
+					if (params.outputGAFFile != "")
+					{
+						AddGAFLine(alignmentGraph, fastq_1st->seq_id, fastq_1st->sequence, alignments->alignments.back());
+					}
+				}
+				else {
+					coutoutput << "Distance constraints failed" << BufferedWriter::Flush;
+				}
+				if (matched == alns_2nd->alignments.size()) all_ends_added = true;
+			}
+			alns_1st = nullptr;
+			alns_2nd = nullptr;
+
+			std::sort(alignments->alignments.begin(), alignments->alignments.end(), [](const AlignmentResult::AlignmentItem& left, const AlignmentResult::AlignmentItem& right) { return left.alignmentStart < right.alignmentStart; });
+
+			stats.alignments += alignments->alignments.size();
+
+			try
+			{
+				if (params.outputGAMFile != "") writeGAMToQueue(GAMToken, params, GAMOut, *alignments);
+				if (params.outputJSONFile != "") writeJSONToQueue(JSONToken, params, JSONOut, *alignments);
+				if (params.outputGAFFile != "") writeGAFToQueue(GAFToken, params, GAFOut, *alignments);
+				if (params.outputCorrectedFile != "") std::runtime_error("not implemented for paired-end reads");
+				if (params.outputCorrectedClippedFile != "") writeCorrectedClippedToQueue(clippedToken, params, correctedClippedOut, *alignments);
+			}
+			catch (const ThreadReadAssertion::AssertionFailure& a)
+			{
+				reusableState.clear();
+				stats.assertionBroke = true;
+				continue;
 			}
 		}
+		else
+		{
+			if (params.outputGAMFile != "" || params.outputJSONFile != "")
+			{
+				for (size_t i = 0; i < alignments->alignments.size(); i++)
+				{
+					AddAlignment(fastq->seq_id, fastq->sequence, alignments->alignments[i]);
+					replaceDigraphNodeIdsWithOriginalNodeIds(*alignments->alignments[i].alignment, alignmentGraph);
+				}
+			}
+
+			if (params.outputGAFFile != "")
+			{
+				for (size_t i = 0; i < alignments->alignments.size(); i++)
+				{
+					AddGAFLine(alignmentGraph, fastq->seq_id, fastq->sequence, alignments->alignments[i]);
+				}
+			}
 		
-		std::sort(alignments->alignments.begin(), alignments->alignments.end(), [](const AlignmentResult::AlignmentItem& left, const AlignmentResult::AlignmentItem& right) { return left.alignmentStart < right.alignmentStart; });
+			std::sort(alignments->alignments.begin(), alignments->alignments.end(), [](const AlignmentResult::AlignmentItem& left, const AlignmentResult::AlignmentItem& right) { return left.alignmentStart < right.alignmentStart; });
 
-		std::string alignmentpositions;
+			std::string alignmentpositions;
 
-		for (size_t i = 0; i < alignments->alignments.size(); i++)
-		{
-			stats.alignments += 1;
-			size_t alignmentSize = alignments->alignments[i].alignmentEnd - alignments->alignments[i].alignmentStart;
-			if (alignmentSize == fastq->sequence.size())
+			for (size_t i = 0; i < alignments->alignments.size(); i++)
 			{
-				stats.fullLengthAlignments += 1;
-				stats.bpInFullAlignments += alignmentSize;
+				stats.alignments += 1;
+				size_t alignmentSize = alignments->alignments[i].alignmentEnd - alignments->alignments[i].alignmentStart;
+				if (alignmentSize == fastq->sequence.size())
+				{
+					stats.fullLengthAlignments += 1;
+					stats.bpInFullAlignments += alignmentSize;
+				}
+				stats.bpInAlignments += alignmentSize;
+				if (params.outputCorrectedFile != "" || params.outputCorrectedClippedFile != "") AddCorrected(alignments->alignments[i]);
+				alignmentpositions += std::to_string(alignments->alignments[i].alignmentStart) + "-" + std::to_string(alignments->alignments[i].alignmentEnd) + ", ";
 			}
-			stats.bpInAlignments += alignmentSize;
-			if (params.outputCorrectedFile != "" || params.outputCorrectedClippedFile != "") AddCorrected(alignments->alignments[i]);
-			alignmentpositions += std::to_string(alignments->alignments[i].alignmentStart) + "-" + std::to_string(alignments->alignments[i].alignmentEnd) + ", ";
-		}
 
-		alignmentpositions.pop_back();
-		alignmentpositions.pop_back();
-		coutoutput << "Read " << fastq->seq_id << " aligned by thread " << threadnum << " with positions: " << alignmentpositions << " (read " << fastq->sequence.size() << "bp)" << BufferedWriter::Flush;
+			alignmentpositions.pop_back();
+			alignmentpositions.pop_back();
+			coutoutput << "Read " << fastq->seq_id << " aligned by thread " << threadnum << " with positions: " << alignmentpositions << " (read " << fastq->sequence.size() << "bp)" << BufferedWriter::Flush;
 
-		try
-		{
-			if (params.outputGAMFile != "") writeGAMToQueue(GAMToken, params, GAMOut, *alignments);
-			if (params.outputJSONFile != "") writeJSONToQueue(JSONToken, params, JSONOut, *alignments);
-			if (params.outputGAFFile != "") writeGAFToQueue(GAFToken, params, GAFOut, *alignments);
-			if (params.outputCorrectedFile != "") writeCorrectedToQueue(correctedToken, params, fastq->seq_id, fastq->sequence, alignmentGraph.getDBGoverlap(), correctedOut, *alignments);
-			if (params.outputCorrectedClippedFile != "") writeCorrectedClippedToQueue(clippedToken, params, correctedClippedOut, *alignments);
-		}
-		catch (const ThreadReadAssertion::AssertionFailure& a)
-		{
-			reusableState.clear();
-			stats.assertionBroke = true;
-			continue;
+			try
+			{
+				if (params.outputGAMFile != "") writeGAMToQueue(GAMToken, params, GAMOut, *alignments);
+				if (params.outputJSONFile != "") writeJSONToQueue(JSONToken, params, JSONOut, *alignments);
+				if (params.outputGAFFile != "") writeGAFToQueue(GAFToken, params, GAFOut, *alignments);
+				if (params.outputCorrectedFile != "") writeCorrectedToQueue(correctedToken, params, fastq->seq_id, fastq->sequence, alignmentGraph.getDBGoverlap(), correctedOut, *alignments);
+				if (params.outputCorrectedClippedFile != "") writeCorrectedClippedToQueue(clippedToken, params, correctedClippedOut, *alignments);
+			}
+			catch (const ThreadReadAssertion::AssertionFailure& a)
+			{
+				reusableState.clear();
+				stats.assertionBroke = true;
+				continue;
+			}
 		}
 	}
 	assertSetNoRead("After all reads");
@@ -736,7 +977,7 @@ AlignmentGraph getGraph(std::string graphFile, MummerSeeder** mxmSeeder, psi::gr
 			std::cout << "PSI: You can get the PSI::SeedFinder status report by sending SIGUSR1" << std::endl;
 #endif
 			/* Load the genome-wide path index for the graph if available. */
-			if ((*psiseeder)->load_path_index(params.seederCachePrefix, params.psiContext, params.psiStep))
+			if ((*psiseeder)->load_path_index(params.seederCachePrefix, params.psiContext, params.psiStep, params.readMinInsertSize, params.readMaxInsertSize))
 			{
 				std::cout << "PSI: Loaded existing path index" << std::endl;
 			}
@@ -748,7 +989,13 @@ AlignmentGraph getGraph(std::string graphFile, MummerSeeder** mxmSeeder, psi::gr
 			else
 			{
 				std::cout << "PSI: Create a path index with " << params.psiPathCount << " paths" << std::endl;
-				(*psiseeder)->create_path_index(params.psiPathCount, /*patched=*/true, params.psiContext, params.psiStep);
+				(*psiseeder)->create_path_index(params.psiPathCount, /*patched=*/true, params.psiContext, params.psiStep, params.readMinInsertSize, params.readMaxInsertSize,
+																				[](auto msg){
+																					std::cout << msg << std::endl;
+																				},
+																				[](auto msg){
+																					std::cerr << msg << std::endl;
+																				});
 				/* Serialize the indexed paths. */
 				if (!params.seederCachePrefix.empty())
 				{
@@ -801,8 +1048,11 @@ AlignmentGraph getGraph(std::string graphFile, MummerSeeder** mxmSeeder, psi::gr
 	}
 }
 
-void alignReads(AlignerParams params)
+template<typename TSpec>
+void alignReads(AlignerParams params, TSpec)
 {
+	using entry_type = typename Entry<TSpec, FastQ>::type;
+
 	assertSetNoRead("Preprocessing");
 	auto preProcStart = std::chrono::system_clock::now();
 
@@ -862,6 +1112,8 @@ void alignReads(AlignerParams params)
 								<< ", context " << params.psiContext
 								<< ", step " << params.psiStep
 								<< ", GOCC threshold " << params.psiGoccThreshold
+								<< ", distance index minimum insert size " << params.readMinInsertSize
+								<< ", distance index maximum insert size " << params.readMaxInsertSize
 								<< std::endl;
 			break;
 		case Seeder::Mode::Mum:
@@ -918,7 +1170,7 @@ void alignReads(AlignerParams params)
 	moodycamel::ConcurrentQueue<std::string*> deallocAlns;
 	moodycamel::ConcurrentQueue<std::string*> outputCorrected { 50, params.numThreads, params.numThreads };
 	moodycamel::ConcurrentQueue<std::string*> outputCorrectedClipped { 50, params.numThreads, params.numThreads };
-	moodycamel::ConcurrentQueue<std::shared_ptr<FastQ>> readFastqsQueue;
+	moodycamel::ConcurrentQueue<entry_type> readFastqsQueue;
 	std::atomic<bool> readStreamingFinished { false };
 	std::atomic<bool> allThreadsDone { false };
 	std::atomic<bool> GAMWriteDone { false };
@@ -937,7 +1189,7 @@ void alignReads(AlignerParams params)
 	std::thread correctedClippedWriterThread { [file=params.outputCorrectedClippedFile, &outputCorrectedClipped, &deallocAlns, &allThreadsDone, &correctedClippedWriteDone, verboseMode=params.verboseMode, uncompressed=!params.compressClipped]() { if (file != "") consumeBytesAndWrite(file, outputCorrectedClipped, deallocAlns, allThreadsDone, correctedClippedWriteDone, verboseMode, uncompressed); else correctedClippedWriteDone = true; } };
 
 	{
-		[[maybe_unused]] auto timer = psi::seeder_type::stats_type::timer_type( "alignment" );
+		[[maybe_unused]] auto timer = psi::seeder_type::stats_type::timer_type("alignment");
 		for (size_t i = 0; i < params.numThreads; i++)
 		{
 			threads.emplace_back([&alignmentGraph, &readFastqsQueue, &readStreamingFinished, i, seeder, params, &outputGAM, &outputJSON, &outputGAF, &outputCorrected, &outputCorrectedClipped, &deallocAlns, &stats]() { runComponentMappings(alignmentGraph, readFastqsQueue, readStreamingFinished, i, seeder, params, outputGAM, outputJSON, outputGAF, outputCorrected, outputCorrectedClipped, deallocAlns, stats); });
@@ -980,13 +1232,17 @@ void alignReads(AlignerParams params)
 	if (stats.allAlignmentsCount > stats.alignments) std::cout << " (" << (stats.allAlignmentsCount - stats.alignments) << " additional alignments discarded)";
 	std::cout << std::endl;
 	std::cout << "End-to-end alignments: " << stats.fullLengthAlignments << " (" << stats.bpInFullAlignments << "bp)" << std::endl;
+	std::cout << "Chunks processed: " << stats.nofChunks << " (in " << params.numThreads << " threads)" << std::endl;
 	if (stats.assertionBroke)
 	{
 		std::cout << "Alignment broke with some reads. Look at stderr output." << std::endl;
 	}
 
-	for ( const auto& timer : psi::seeder_type::stats_type::timer_type::get_timers() )
+	for (const auto& timer : psi::seeder_type::stats_type::timer_type::get_timers())
 	{
 		std::cout << "PSI timer '" << timer.first << "': " << timer.second.str() << std::endl;
 	}
 }
+
+template void alignReads< SingleEnd >(AlignerParams params, SingleEnd);
+template void alignReads< PairedEnd >(AlignerParams params, PairedEnd);
