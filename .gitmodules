@@ -10,3 +10,6 @@
 [submodule "BBHash"]
 	path = BBHash
 	url = https://github.com/maickrau/BBHash.git
+[submodule "psi"]
+	path = psi
+	url = https://github.com/cartoonist/psi.git
