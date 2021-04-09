@@ -4,7 +4,7 @@
 #define GraphAlignerWrapper_h
 
 #include <tuple>
-#include "vg.pb.h"
+#include <vg/vg.pb.h>
 #include "GraphAlignerCommon.h"
 #include "AlignmentGraph.h"
 

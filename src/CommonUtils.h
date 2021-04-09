@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 #include <sstream>
-#include "vg.pb.h"
+#include <vg/vg.pb.h>
 
 namespace CommonUtils
 {

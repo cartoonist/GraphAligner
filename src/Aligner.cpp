@@ -12,7 +12,6 @@
 #include <gum/io_utils.hpp>
 #include "Aligner.h"
 #include "CommonUtils.h"
-#include "vg.pb.h"
 #include "stream.hpp"
 #include "fastqloader.h"
 #include "BigraphToDigraph.h"

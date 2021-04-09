@@ -3,8 +3,8 @@
 
 #include <string>
 #include <vector>
+#include <vg/vg.pb.h>
 #include "AlignmentGraph.h"
-#include "vg.pb.h"
 #include "AlignmentSelection.h"
 
 struct AlignerParams

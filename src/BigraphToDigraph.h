@@ -4,8 +4,8 @@
 #include <tuple>
 #include <vector>
 #include <string>
+#include <vg/vg.pb.h>
 #include "AlignmentGraph.h"
-#include "vg.pb.h"
 #include "GfaGraph.h"
 
 class DirectedGraph

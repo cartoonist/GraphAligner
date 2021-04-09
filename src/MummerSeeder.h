@@ -5,9 +5,9 @@
 #include <string>
 #include <mummer/sparseSA.hpp>
 #include <mummer/fasta.hpp>
+#include <vg/vg.pb.h>
 #include "GfaGraph.h"
 #include "GraphAlignerWrapper.h"
-#include "vg.pb.h"
 
 class MummerSeeder
 {

@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <vector>
 #include <functional>
-#include "vg.pb.h"
+#include <vg/vg.pb.h>
 #include "GraphAlignerCommon.h"
 
 namespace AlignmentSelection

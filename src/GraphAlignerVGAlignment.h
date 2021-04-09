@@ -3,8 +3,8 @@
 
 #include <string>
 #include <vector>
+#include <vg/vg.pb.h>
 #include "AlignmentGraph.h"
-#include "vg.pb.h"
 #include "NodeSlice.h"
 #include "CommonUtils.h"
 #include "ThreadReadAssertion.h"

@@ -3,7 +3,6 @@
 #include <cassert>
 #include <unordered_map>
 #include "CommonUtils.h"
-#include "vg.pb.h"
 #include "fastqloader.h"
 #include "BigraphToDigraph.h"
 #include "ThreadReadAssertion.h"
