@@ -2,7 +2,7 @@
 #define DijkstraQueue_h
 
 #include <queue>
-#include <phmap.h>
+#include <parallel_hashmap/phmap.h>
 #include "ThreadReadAssertion.h"
 
 namespace std
