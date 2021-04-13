@@ -31,7 +31,6 @@ if(NOT TARGET ParallelHashmap::ParallelHashmap)
   add_library(ParallelHashmap::ParallelHashmap INTERFACE IMPORTED)
   set_target_properties(ParallelHashmap::ParallelHashmap PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "$<BUILD_INTERFACE:${INSTALL_DIR}/include>;$<INSTALL_INTERFACE:$<INSTALL_PREFIX>/${CMAKE_INSTALL_INCLUDEDIR}>")
-  install(DIRECTORY ${INSTALL_DIR}/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 endif()
 
 # If `concurrentqueue` is not found by `find_package`

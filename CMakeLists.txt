@@ -9,6 +9,7 @@ include(GNUInstallDirs)
 # Adding CMake module path.
 list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake/modules)
 # Finding dependencies.
+find_package(ZLIB REQUIRED)
 find_package(jemalloc REQUIRED)
 find_package(sdsl REQUIRED)
 find_package(Mummer REQUIRED)
@@ -26,7 +27,7 @@ include(${PROJECT_SOURCE_DIR}/external.cmake)
 
 # Load `CheckGitRevision` module
 include(CheckGitRevision)
-set(VERSION ${GIT_REVISION} ${GIT_COMMIT_DATE})
+set(VERSION "${GIT_REVISION} ${GIT_COMMIT_DATE}")
 
 # Defining GraphAligner source files
 set(GRAPHALIGNER_SOURCES "src/AlignerMain.cpp"
@@ -56,7 +57,7 @@ target_compile_features(GraphAligner PRIVATE cxx_std_17)
 # Defining include directories
 target_include_directories(GraphAligner
   PRIVATE jemalloc::jemalloc
-	PRIVATE mummer::mummer
+	PRIVATE Mummer::Mummer
 	PRIVATE VGio::VGio
 	PRIVATE Boost::serialization
 	PRIVATE Boost::program_options
@@ -68,13 +69,14 @@ target_include_directories(GraphAligner
 # Defining link libraries
 target_link_libraries(GraphAligner
   PRIVATE jemalloc::jemalloc
-	PRIVATE mummer::mummer
+	PRIVATE Mummer::Mummer
 	PRIVATE VGio::VGio
 	PRIVATE Boost::serialization
 	PRIVATE Boost::program_options
 # PRIVATE ParallelHashmap::ParallelHashmap
 	PRIVATE BBHash::BBHash
 	PRIVATE zstr::zstr
+	PRIVATE ZLIB::ZLIB
   PRIVATE psi::psi)
 # Install GraphAligner
 install(TARGETS GraphAligner DESTINATION ${CMAKE_INSTALL_BINDIR})
@@ -98,6 +100,7 @@ target_include_directories(UntipRelative
 # Defining link libraries
 target_link_libraries(UntipRelative
 	PRIVATE VGio::VGio
-	PRIVATE zstr::zstr)
+	PRIVATE zstr::zstr
+	PRIVATE ZLIB::ZLIB)
 # Install UntipRelative
 install(TARGETS UntipRelative DESTINATION ${CMAKE_INSTALL_BINDIR})
