@@ -34,6 +34,7 @@ struct AlignerParams
 	size_t psiContext;
 	size_t psiStep;
 	size_t psiGoccThreshold;
+	size_t psiMaxMem;
 	size_t mxmLength;
 	size_t mumCount;
 	size_t memCount;

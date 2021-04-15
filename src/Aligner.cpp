@@ -969,7 +969,7 @@ AlignmentGraph getGraph(std::string graphFile, MummerSeeder** mxmSeeder, psi::gr
 			[[maybe_unused]] auto timer = psi::seeder_type::stats_type::timer_type("psi-prepare");
 			std::cout << "Initializing Pan-genome Seed Index (PSI)" << std::endl;
 			gum::util::load(seedGraph, graphFile, true);
-			*psiseeder = new psi::seeder_type(seedGraph, params.psiLength, params.psiGoccThreshold);
+			*psiseeder = new psi::seeder_type(seedGraph, params.psiLength, params.psiGoccThreshold, params.psiMaxMem);
 			std::signal(SIGUSR1, psi::seeder_type::stats_type::signal_handler);
 #ifdef PSI_STATS
 			std::cout << "PSI: Custom signal handler for SIGUSR1 has been set" << std::endl;
