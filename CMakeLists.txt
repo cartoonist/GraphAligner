@@ -50,7 +50,7 @@ add_executable(GraphAligner ${GRAPHALIGNER_SOURCES})
 if(TARGET parallelhashmap_git)
 	add_dependencies(GraphAligner parallelhashmap_git)
 endif()
-target_compile_definitions(GraphAligner PRIVATE VERSION)
+target_compile_definitions(GraphAligner PRIVATE VERSION="${VERSION}")
 target_compile_options(GraphAligner PRIVATE -g -Wall -Wpedantic -Wextra)
 # Use C++17
 target_compile_features(GraphAligner PRIVATE cxx_std_17)
