@@ -1001,6 +1001,7 @@ AlignmentGraph getGraph(std::string graphFile, MummerSeeder** mxmSeeder, psi::gr
 					(*psiseeder)->serialize_path_index(params.seederCachePrefix, params.psiStep);
 				}
 			}
+			std::cout << "PSI: Number of uncovered loci: " << (*psiseeder)->get_starting_loci().size() << std::endl;
 		}
 		if (graphFile.substr(graphFile.size()-3) == ".vg")
 		{
@@ -1111,6 +1112,7 @@ void alignReads(AlignerParams params, TSpec)
 								<< ", context " << params.psiContext
 								<< ", step " << params.psiStep
 								<< ", GOCC threshold " << params.psiGoccThreshold
+								<< ", maximum MEMs on paths " << params.psiMaxMem
 								<< ", distance index minimum insert size " << params.readMinInsertSize
 								<< ", distance index maximum insert size " << params.readMaxInsertSize
 								<< std::endl;
