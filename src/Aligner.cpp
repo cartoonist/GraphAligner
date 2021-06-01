@@ -263,11 +263,15 @@ void readFastqs(const std::vector<std::string>& filenames, moodycamel::Concurren
 			if (ends.first == nullptr) {
 				ends.first = std::make_shared<FastQ>();
 				std::swap(*ends.first, read);
+				ends.first->seq_id.pop_back();  // remove delimiter
+				ends.first->seq_id.pop_back();  // remove pair number
 				return;
 			}
 			else {
 				ends.second = std::make_shared<FastQ>();
 				std::swap(*ends.second, read);
+				ends.second->seq_id.pop_back();  // remove delimiter
+				ends.second->seq_id.pop_back();  // remove pair number
 			}
 			size_t slept = 0;
 			while (writequeue.size_approx() > 200)
@@ -519,11 +523,11 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 	TEntry entry;
 	bool has_mate = true;
 	bool stash_next = false;
-	bool drop_pair = false;
 	std::shared_ptr<AlignmentResult> alignments = std::make_shared<AlignmentResult>();
 	std::shared_ptr<AlignmentResult> alns_1st = nullptr;
 	std::shared_ptr<AlignmentResult> alns_2nd = nullptr;
 	std::vector<std::vector<SeedHit>> chunk_hits;
+	auto thread_id = psi::get_thread_id();
 
 	if (seeder.mode == Seeder::Mode::Psi)
 	{
@@ -560,12 +564,14 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 		{
 			assert(!stash_next);
 			if (rid == length(chunk) + 1) {
+				auto chunkno = ++stats.nofChunks;
+				std::cout << "PSI: Thread " << thread_id << " started processing chunk " << chunkno << " with " << length(chunk) << " reads" << std::endl;
 				assert(chunk_hits.empty());
 				auto timeStart = std::chrono::system_clock::now();
 				chunk_hits = seeder.getSeeds(chunk, seeds, traverser, params);
 				auto timeEnd = std::chrono::system_clock::now();
 				size_t time = std::chrono::duration_cast<std::chrono::milliseconds>(timeEnd - timeStart).count();
-				coutoutput << "Chunk " << ++stats.nofChunks << " seeding took " << time << "ms" << BufferedWriter::Flush;
+				std::cout << "PSI: Thread " << thread_id << " finished seed finding of chunk " << chunkno << " in " << time << "ms" << std::endl;
 			}
 			else if (rid == 1)
 			{
@@ -588,7 +594,6 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 			if (!has_mate)
 			{
 				assert(!stash_next);
-				assert(!drop_pair);
 				clear(entry);
 				while (isEmpty(entry) && !readFastqsQueue.try_dequeue(entry))
 				{
@@ -602,7 +607,6 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 				assert(fastq != nullptr);
 				if (stash_next)
 				{
-					assert(!drop_pair);
 					/* Append forward */
 					appendValue(chunk.name, fastq->seq_id);
 					appendValue(chunk.str, fastq->sequence);
@@ -613,13 +617,6 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 					continue;
 				}
 			}
-		}
-
-		if (drop_pair)
-		{
-			drop_pair = false;
-			cerroutput << "Dropping read " << fastq->seq_id << " since its pair does not have any alignment" << BufferedWriter::Flush;
-			continue;
 		}
 
 		if (fastq == nullptr)
@@ -778,20 +775,21 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 				stats.assertionBroke = true;
 				continue;
 			}
-			if (!isSingle(entry) && !has_mate) drop_pair = true;  // paired end and its mate is not aligned
-			continue;
+			if (isSingle(entry) || !has_mate || alns_1st == nullptr) continue;
 		}
-
-		stats.seedsExtended += alignments->seedsExtended;
-		stats.readsWithAnAlignment += 1;
-
-		size_t totalcells = 0;
-		for (size_t i = 0; i < alignments->alignments.size(); i++)
+		else
 		{
-			totalcells += alignments->alignments[i].cellsProcessed;
-		}
+			stats.seedsExtended += alignments->seedsExtended;
+			stats.readsWithAnAlignment += 1;
+
+			size_t totalcells = 0;
+			for (size_t i = 0; i < alignments->alignments.size(); i++)
+			{
+				totalcells += alignments->alignments[i].cellsProcessed;
+			}
 		
-		std::sort(alignments->alignments.begin(), alignments->alignments.end(), [](const AlignmentResult::AlignmentItem& left, const AlignmentResult::AlignmentItem& right) { return left.alignmentStart < right.alignmentStart; });
+			std::sort(alignments->alignments.begin(), alignments->alignments.end(), [](const AlignmentResult::AlignmentItem& left, const AlignmentResult::AlignmentItem& right) { return left.alignmentStart < right.alignmentStart; });
+		}
 
 		if (!isSingle(entry) && seeder.mode == Seeder::Mode::Psi) // paired end
 		{
@@ -802,76 +800,116 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 				alignments = std::make_shared<AlignmentResult>();
 				continue;
 			}
+			if (alns_1st == nullptr)  // first mate had no alignment
+			{
+				alns_1st = std::make_shared<AlignmentResult>();
+				alns_1st->readName = alns_2nd->readName;
+			}
 			/* else */
 			assert(alns_2nd == nullptr);
 			alns_2nd = alignments;
 			alignments = std::make_shared<AlignmentResult>();
-
-			std::vector<bool> added(alns_2nd->alignments.size(), 0);
-			bool all_ends_added = false;
+			alignments->seedsExtended = alns_1st->seedsExtended + alns_2nd->seedsExtended;
+			alignments->readName = alns_1st->readName;
+			if (alns_1st->readName != alns_2nd->readName) std::cerr << "The name of pairs are different (" << alns_1st->readName << " != " << alns_2nd->readName << ")" << std::endl;
+			std::vector<std::pair<AlignmentResult::AlignmentItem, AlignmentResult::AlignmentItem>> paired_alignments;
+			std::vector<bool> mark1(alns_1st->alignments.size(), 0);
+			std::vector<bool> mark2(alns_2nd->alignments.size(), 0);
+			auto mate_fastq = getOneEnd(entry);
 			for (size_t i = 0; i < alns_1st->alignments.size(); ++i)
 			{
-				unsigned int matched = 0;
+				size_t alignmentSize = alns_1st->alignments[i].alignmentEnd - alns_1st->alignments[i].alignmentStart;
+				if (alignmentSize == mate_fastq->sequence.size())
+				{
+					stats.fullLengthAlignments += 1;
+					stats.bpInFullAlignments += alignmentSize;
+				}
+				stats.bpInAlignments += alignmentSize;
+			}
+			for (size_t j = 0; j < alns_2nd->alignments.size(); ++j)
+			{
+				size_t alignmentSize = alns_2nd->alignments[j].alignmentEnd - alns_2nd->alignments[j].alignmentStart;
+				if (alignmentSize == fastq->sequence.size())
+				{
+					stats.fullLengthAlignments += 1;
+					stats.bpInFullAlignments += alignmentSize;
+				}
+				stats.bpInAlignments += alignmentSize;
+			}
+
+			if (params.outputGAMFile != "" || params.outputJSONFile != "")
+			{
+				for (size_t i = 0; i < alns_1st->alignments.size(); ++i)
+				{
+					AddAlignment(mate_fastq->seq_id, mate_fastq->sequence, alns_1st->alignments[i]);
+					replaceDigraphNodeIdsWithOriginalNodeIds(*alns_1st->alignments[i].alignment, alignmentGraph);
+				}
+				for (size_t j = 0; j < alns_2nd->alignments.size(); ++j)
+				{
+					AddAlignment(fastq->seq_id, fastq->sequence, alns_2nd->alignments[j]);
+					replaceDigraphNodeIdsWithOriginalNodeIds(*alns_2nd->alignments[j].alignment, alignmentGraph);
+				}
+			}
+
+			if (params.outputGAFFile != "")
+			{
+				for (size_t i = 0; i < alns_1st->alignments.size(); ++i)
+				{
+					AddGAFLine(alignmentGraph, mate_fastq->seq_id, mate_fastq->sequence, alns_1st->alignments[i]);
+				}
+				for (size_t j = 0; j < alns_2nd->alignments.size(); ++j)
+				{
+					AddGAFLine(alignmentGraph, fastq->seq_id, fastq->sequence, alns_2nd->alignments[j]);
+				}
+			}
+
+			for (size_t i = 0; i < alns_1st->alignments.size(); ++i)
+			{
 				for (size_t j = 0; j < alns_2nd->alignments.size(); ++j)
 				{
 					if (seeder.verifyDistance(alns_1st->alignments[i], alns_2nd->alignments[j]))
 					{
-						++matched;
-						if (!added[j])
+						mark1[i] = true;
+						mark2[j] = true;
+						auto p = std::make_pair(alns_1st->alignments[i], alns_2nd->alignments[j]);
+						if (p.first.alignmentStart > p.second.alignmentStart) std::swap(p.first, p.second);
+						if (params.outputGAMFile != "" || params.outputJSONFile != "")
 						{
-							alignments->alignments.push_back(alns_2nd->alignments[j]);
-							auto fastq_2nd = getOtherEnd(entry);
-							size_t alignmentSize = alignments->alignments.back().alignmentEnd - alignments->alignments.back().alignmentStart;
-							if (alignmentSize == fastq_2nd->sequence.size())
-							{
-								stats.fullLengthAlignments += 1;
-								stats.bpInFullAlignments += alignmentSize;
-							}
-							stats.bpInAlignments += alignmentSize;
-							if (params.outputGAMFile != "" || params.outputJSONFile != "")
-							{
-								AddAlignment(fastq_2nd->seq_id, fastq_2nd->sequence, alignments->alignments.back());
-								replaceDigraphNodeIdsWithOriginalNodeIds(*alignments->alignments.back().alignment, alignmentGraph);
-							}
-							if (params.outputGAFFile != "")
-							{
-								AddGAFLine(alignmentGraph, fastq_2nd->seq_id, fastq_2nd->sequence, alignments->alignments.back());
-							}
-							added[j] = true;
+							p.first.alignment->mutable_fragment_next()->set_name(fastq->seq_id);
+							p.second.alignment->mutable_fragment_prev()->set_name(mate_fastq->seq_id);
 						}
-					}
-					if (matched && all_ends_added) break;
-				}
-				if (matched)
-				{
-					alignments->alignments.push_back(alns_1st->alignments[i]);
-					auto fastq_1st = getOneEnd(entry);
-					size_t alignmentSize = alignments->alignments.back().alignmentEnd - alignments->alignments.back().alignmentStart;
-					if (alignmentSize == fastq_1st->sequence.size())
-					{
-						stats.fullLengthAlignments += 1;
-						stats.bpInFullAlignments += alignmentSize;
-					}
-					stats.bpInAlignments += alignmentSize;
-					if (params.outputGAMFile != "" || params.outputJSONFile != "")
-					{
-						AddAlignment(fastq_1st->seq_id, fastq_1st->sequence, alignments->alignments.back());
-						replaceDigraphNodeIdsWithOriginalNodeIds(*alignments->alignments.back().alignment, alignmentGraph);
-					}
-					if (params.outputGAFFile != "")
-					{
-						AddGAFLine(alignmentGraph, fastq_1st->seq_id, fastq_1st->sequence, alignments->alignments.back());
+						if (params.outputGAFFile != "")
+						{
+							p.first.GAFline += "\tfn:Z:" + fastq->seq_id;
+							p.second.GAFline += "\tfp:Z:" + mate_fastq->seq_id;
+						}
+						paired_alignments.push_back(std::move(p));
 					}
 				}
-				else {
-					coutoutput << "Distance constraints failed" << BufferedWriter::Flush;
-				}
-				if (matched == alns_2nd->alignments.size()) all_ends_added = true;
 			}
+
+			std::sort(paired_alignments.begin(), paired_alignments.end(), [](const auto& l, const auto& r) { return l.first.alignmentStart < r.first.alignmentStart; });
+
+			for (size_t i = 0; i < paired_alignments.size(); i++)
+			{
+				alignments->alignments.push_back(std::move(paired_alignments[i].first));
+				alignments->alignments.push_back(std::move(paired_alignments[i].second));
+			}
+			for (size_t i = 0; i < alns_1st->alignments.size(); ++i)
+			{
+				if (mark1[i]) continue;
+				alignments->alignments.push_back(alns_1st->alignments[i]);
+			}
+			for (size_t j = 0; j < alns_2nd->alignments.size(); ++j)
+			{
+				if (mark2[j]) continue;
+				alignments->alignments.push_back(alns_2nd->alignments[j]);
+			}
+
+			std::sort(alignments->alignments.begin() + 2*paired_alignments.size(), alignments->alignments.end(), [](const AlignmentResult::AlignmentItem& left, const AlignmentResult::AlignmentItem& right) { return left.alignmentStart < right.alignmentStart; });
+
 			alns_1st = nullptr;
 			alns_2nd = nullptr;
-
-			std::sort(alignments->alignments.begin(), alignments->alignments.end(), [](const AlignmentResult::AlignmentItem& left, const AlignmentResult::AlignmentItem& right) { return left.alignmentStart < right.alignmentStart; });
 
 			stats.alignments += alignments->alignments.size();
 
