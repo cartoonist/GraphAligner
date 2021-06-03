@@ -86,10 +86,25 @@ getOneEnd(std::shared_ptr<TValue>& entry)
 }
 
 template<typename TValue>
+inline void
+setOneEnd(std::shared_ptr<TValue>& entry, TValue value)
+{
+	entry = std::make_shared<TValue>();
+	std::swap(*entry, value);
+}
+
+template<typename TValue>
 inline std::shared_ptr<TValue>&
 getOtherEnd(std::shared_ptr<TValue>& entry)
 {
 	return Entry<SingleEnd, TValue>::getNullEnd();
+}
+
+template<typename TValue>
+inline void
+setOtherEnd(std::shared_ptr<TValue>&, TValue)
+{
+	throw std::runtime_error("cannot set second end of a single-end entry");
 }
 
 template<typename TValue>
@@ -128,10 +143,26 @@ getOneEnd(std::pair<std::shared_ptr<TValue>, std::shared_ptr<TValue>>& entry)
 }
 
 template<typename TValue>
+inline void
+setOneEnd(std::pair<std::shared_ptr<TValue>, std::shared_ptr<TValue>>& entry, TValue value)
+{
+	entry.first = std::make_shared<TValue>();
+	std::swap(*entry.first, value);
+}
+
+template<typename TValue>
 inline std::shared_ptr<TValue>&
 getOtherEnd(std::pair<std::shared_ptr<TValue>, std::shared_ptr<TValue>>& entry)
 {
 	return entry.second;
+}
+
+template<typename TValue>
+inline void
+setOtherEnd(std::pair<std::shared_ptr<TValue>, std::shared_ptr<TValue>>& entry, TValue value)
+{
+	entry.second = std::make_shared<TValue>();
+	std::swap(*entry.second, value);
 }
 
 template<typename TValue>

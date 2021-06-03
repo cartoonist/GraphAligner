@@ -522,7 +522,6 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 	psi::seeder_type::traverser_type traverser;
 	TEntry entry;
 	bool has_mate = true;
-	bool stash_next = false;
 	std::shared_ptr<AlignmentResult> alignments = std::make_shared<AlignmentResult>();
 	std::shared_ptr<AlignmentResult> alns_1st = nullptr;
 	std::shared_ptr<AlignmentResult> alns_2nd = nullptr;
@@ -562,7 +561,6 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 
 		if (rid)
 		{
-			assert(!stash_next);
 			if (rid == length(chunk) + 1) {
 				auto chunkno = ++stats.nofChunks;
 				std::cout << "PSI: Thread " << thread_id << " started processing chunk " << chunkno << " with " << length(chunk) << " reads" << std::endl;
@@ -573,17 +571,30 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 				size_t time = std::chrono::duration_cast<std::chrono::milliseconds>(timeEnd - timeStart).count();
 				std::cout << "PSI: Thread " << thread_id << " finished seed finding of chunk " << chunkno << " in " << time << "ms" << std::endl;
 			}
-			else if (rid == 1)
+			else if (rid == 1 && !has_mate)
 			{
 				clear(chunk);
 				rid = 0;
 				has_mate = true;
 				continue;
 			}
-			rid -= 2;  /* NOTE: Also skips the reverse complement */
-			fastq = std::make_shared<FastQ>();
-			fastq->seq_id = toCString(chunk.name[rid-1]);
-			fastq->sequence = toCString(seqan::String<char, seqan::CStyle>(chunk.str[rid-1]));
+			fastq = getOtherEnd(entry);
+			if (!has_mate)
+			{
+				FastQ read;
+				rid -= 2;  /* NOTE: Also skips the reverse complement */
+				read.seq_id = toCString(chunk.name[rid-1]);
+				read.sequence = toCString(seqan::String<char, seqan::CStyle>(chunk.str[rid-1]));
+				setOneEnd(entry, std::move(read));
+				if (!isSingle(entry)) {
+					rid -= 2;  /* NOTE: Also skips the reverse complement */
+					read.seq_id = toCString(chunk.name[rid-1]);
+					read.sequence = toCString(seqan::String<char, seqan::CStyle>(chunk.str[rid-1]));
+					setOtherEnd(entry, std::move(read));
+				}
+				fastq = getOneEnd(entry);
+			}
+			else assert(fastq != nullptr);
 			//getQualities(cur_read.quality, chunk.str[rid-1]);
 			chunk_hits.back().swap(hits);
 			chunk_hits.pop_back();
@@ -593,7 +604,6 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 			fastq = getOtherEnd(entry);
 			if (!has_mate)
 			{
-				assert(!stash_next);
 				clear(entry);
 				while (isEmpty(entry) && !readFastqsQueue.try_dequeue(entry))
 				{
@@ -603,20 +613,7 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 				}
 				fastq = getOneEnd(entry);
 			}
-			else {
-				assert(fastq != nullptr);
-				if (stash_next)
-				{
-					/* Append forward */
-					appendValue(chunk.name, fastq->seq_id);
-					appendValue(chunk.str, fastq->sequence);
-					/* Append reverse complement */
-					appendValue(chunk.name, fastq->seq_id);
-					appendValue(chunk.str, CommonUtils::ReverseComplement(fastq->sequence));
-					stash_next = false;
-					continue;
-				}
-			}
+			else assert(fastq != nullptr);
 		}
 
 		if (fastq == nullptr)
@@ -654,18 +651,22 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 						appendValue(chunk.str, CommonUtils::ReverseComplement(fastq->sequence));
 						if (!isSingle(entry))
 						{
-							if (!has_mate) stash_next = true;
+							if (!has_mate)
+							{
+								fastq = getOtherEnd(entry);
+								has_mate = true;
+							}
 							else
 							{
-								auto mate_fastq = getOneEnd(entry);
-								/* Append forward */
-								appendValue(chunk.name, mate_fastq->seq_id);
-								appendValue(chunk.str, mate_fastq->sequence);
-								/* Append reverse complement */
-								appendValue(chunk.name, mate_fastq->seq_id);
-								appendValue(chunk.str, CommonUtils::ReverseComplement(mate_fastq->sequence));
-								alns_1st = nullptr;
+								fastq = getOneEnd(entry);
+								alns_1st = nullptr;  // discard alignments of the first end
 							}
+							/* Append forward */
+							appendValue(chunk.name, fastq->seq_id);
+							appendValue(chunk.str, fastq->sequence);
+							/* Append reverse complement */
+							appendValue(chunk.name, fastq->seq_id);
+							appendValue(chunk.str, CommonUtils::ReverseComplement(fastq->sequence));
 						}
 						coutoutput << "Read " << fastq->seq_id << " added to the current chunk for traversal" << BufferedWriter::Flush;
 						cerroutput << "Read " << fastq->seq_id << " added to the current chunk for traversal" << BufferedWriter::Flush;
