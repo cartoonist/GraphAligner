@@ -26,9 +26,9 @@ int main(int argc, char** argv)
 #endif
 
 	struct sigaction act;
-	act.sa_handler = ThreadReadAssertion::signal;
+	act.sa_sigaction = ThreadReadAssertion::bt_sighandler;
 	sigemptyset(&act.sa_mask);
-	act.sa_flags = 0;
+	act.sa_flags = ~SA_RESTART | SA_SIGINFO;
 	sigaction(SIGSEGV, &act, 0);
 
 	boost::program_options::options_description mandatory("Mandatory parameters");

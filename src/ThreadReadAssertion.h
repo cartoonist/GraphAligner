@@ -1,6 +1,10 @@
 #ifndef ThreadReadAssertion_h
 #define ThreadReadAssertion_h
 
+#include <csignal>
+#include <cstring>
+#include <dlfcn.h>
+#include <execinfo.h>
 #include <string>
 
 namespace ThreadReadAssertion
@@ -12,6 +16,7 @@ namespace ThreadReadAssertion
 	void setSeed(int nodeID, bool reverse, size_t seqPos, size_t matchLen, size_t nodeOffset);
 	void assertFailed(const char* expression, const char* file, int line);
 	void signal(int signal);
+	void bt_sighandler(int sig, siginfo_t* info, void* secret);
 	std::string assertGetSeedInfo();
 }
 
