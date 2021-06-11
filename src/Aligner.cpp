@@ -826,6 +826,8 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 				assert(alns_1st == nullptr);
 				alns_1st = alignments;
 				alignments = std::make_shared<AlignmentResult>();
+				coutoutput << "First end of read " << fastq->seq_id << " is aligned, let's align its mate" << BufferedWriter::Flush;
+				cerroutput << "First end of read " << fastq->seq_id << " is aligned, let's align its mate" << BufferedWriter::Flush;
 				continue;
 			}
 			if (alns_1st == nullptr)  // first mate had no alignment
@@ -833,6 +835,8 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 				alns_1st = std::make_shared<AlignmentResult>();
 				alns_1st->readName = alignments->readName;
 			}
+			coutoutput << "All ends of read " << fastq->seq_id << " is processed" << BufferedWriter::Flush;
+			cerroutput << "All ends of read " << fastq->seq_id << " is processed" << BufferedWriter::Flush;
 			/* else */
 			assert(alns_2nd == nullptr);
 			alns_2nd = alignments;
@@ -844,6 +848,8 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 			std::vector<bool> mark1(alns_1st->alignments.size(), 0);
 			std::vector<bool> mark2(alns_2nd->alignments.size(), 0);
 			auto mate_fastq = getOneEnd(entry);
+			coutoutput << "Update statistics of read " << fastq->seq_id << BufferedWriter::Flush;
+			cerroutput << "Update statistics of read " << fastq->seq_id << BufferedWriter::Flush;
 			for (size_t i = 0; i < alns_1st->alignments.size(); ++i)
 			{
 				size_t alignmentSize = alns_1st->alignments[i].alignmentEnd - alns_1st->alignments[i].alignmentStart;
@@ -865,6 +871,8 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 				stats.bpInAlignments += alignmentSize;
 			}
 
+			coutoutput << "Compute alignments of read " << fastq->seq_id << BufferedWriter::Flush;
+			cerroutput << "Compute alignments of read " << fastq->seq_id << BufferedWriter::Flush;
 			if (params.outputGAMFile != "" || params.outputJSONFile != "")
 			{
 				for (size_t i = 0; i < alns_1st->alignments.size(); ++i)
@@ -891,6 +899,8 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 				}
 			}
 
+			coutoutput << "Verifying pair distances of read " << fastq->seq_id << BufferedWriter::Flush;
+			cerroutput << "Verifying pair distances of read " << fastq->seq_id << BufferedWriter::Flush;
 			for (size_t i = 0; i < alns_1st->alignments.size(); ++i)
 			{
 				for (size_t j = 0; j < alns_2nd->alignments.size(); ++j)
@@ -916,8 +926,12 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 				}
 			}
 
+			coutoutput << "Sorting paired alignments of read " << fastq->seq_id << BufferedWriter::Flush;
+			cerroutput << "Sorting paired alignments of read " << fastq->seq_id << BufferedWriter::Flush;
 			std::sort(paired_alignments.begin(), paired_alignments.end(), [](const auto& l, const auto& r) { return l.first.alignmentStart < r.first.alignmentStart; });
 
+			coutoutput << "Collecting all alignments of read " << fastq->seq_id << BufferedWriter::Flush;
+			cerroutput << "Collecting all alignments of read " << fastq->seq_id << BufferedWriter::Flush;
 			for (size_t i = 0; i < paired_alignments.size(); i++)
 			{
 				alignments->alignments.push_back(std::move(paired_alignments[i].first));
@@ -938,6 +952,8 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 
 			stats.alignments += alignments->alignments.size();
 
+			coutoutput << "Writing all alignments of read " << fastq->seq_id << BufferedWriter::Flush;
+			cerroutput << "Writing all alignments of read " << fastq->seq_id << BufferedWriter::Flush;
 			try
 			{
 				if (params.outputGAMFile != "") writeGAMToQueue(GAMToken, params, GAMOut, *alignments);
