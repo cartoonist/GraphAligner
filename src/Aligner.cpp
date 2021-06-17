@@ -559,11 +559,17 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 		/* Toggle `has_mate` if paired end, otherwise `false`. */
 		has_mate = !isSingle(entry) && !has_mate;
 
+		if (!isSingle(entry) && !has_mate)
+		{
+			alns_1st = nullptr;
+			alns_2nd = nullptr;
+		}
+
 		if (rid)
 		{
 			if (rid == length(chunk) + 1) {
 				auto chunkno = ++stats.nofChunks;
-				std::cout << "PSI: Thread " << thread_id << " started processing chunk " << chunkno << " with " << length(chunk) << " reads" << std::endl;
+				std::cout << "PSI: Thread " << thread_id << " started processing chunk " << chunkno << " with " << length(chunk) / (4 - 2*isSingle(entry)) << " reads" << std::endl;
 				assert(chunk_hits.empty());
 				auto timeStart = std::chrono::system_clock::now();
 				chunk_hits = seeder.getSeeds(chunk, seeds, traverser, params);
@@ -804,7 +810,7 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 			if (alns_1st == nullptr)  // first mate had no alignment
 			{
 				alns_1st = std::make_shared<AlignmentResult>();
-				alns_1st->readName = alns_2nd->readName;
+				alns_1st->readName = alignments->readName;
 			}
 			/* else */
 			assert(alns_2nd == nullptr);
@@ -908,9 +914,6 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 			}
 
 			std::sort(alignments->alignments.begin() + 2*paired_alignments.size(), alignments->alignments.end(), [](const AlignmentResult::AlignmentItem& left, const AlignmentResult::AlignmentItem& right) { return left.alignmentStart < right.alignmentStart; });
-
-			alns_1st = nullptr;
-			alns_2nd = nullptr;
 
 			stats.alignments += alignments->alignments.size();
 
