@@ -110,20 +110,41 @@ struct Seeder
 		}
 	}
 	/**
-	 *  @brief  Verify the distance between two alignments of a paired-end read.
+	 *  @brief  Verify the inner distance between two alignments of a paired-end read.
 	 *
 	 *  @params aln1 the first alignment
 	 *  @params aln2 the second alignment
-	 *  @return `true` if they meet the distance constraints; i.e. there is a path of the
-	 *  length in the range [m, M], where m and M is minimum and maximum insert size
-	 *  respectively. Otherwise, it returns `false`.
+	 *  @return `true` if they meet the distance constraints; i.e. there is a path of a
+	 *  length in the range [m, M], where m and M is the minimum and the maximum of the
+	 *  inner distance between read ends respectively. Otherwise, it returns `false`.
 	 *
-	 *  NOTE: This function assumes that the input reads are forward-reversed.
+	 *  NOTE: This function assumes that the input reads are forward-reverse.
 	 */
-	bool verifyDistance(AlignmentResult::AlignmentItem& aln1, AlignmentResult::AlignmentItem& aln2) const
+	bool verifyInnerDistance(AlignmentResult::AlignmentItem& aln1, AlignmentResult::AlignmentItem& aln2) const
 	{
 		auto fwd = aln1.trace->trace.back().DPposition;
 		auto bwd = aln2.trace->trace.back().DPposition;
+		if (fwd.node % 2 == 1) std::swap(fwd, bwd);
+		auto fwd_head_id = this->psiSeeder->get_graph_ptr()->id_by_coordinate(fwd.node / 2);
+		auto bwd_head_id = this->psiSeeder->get_graph_ptr()->id_by_coordinate(bwd.node / 2);
+		auto bwd_head_offset = this->psiSeeder->get_graph_ptr()->node_length(bwd_head_id) - bwd.nodeOffset - 1;
+		return psiSeeder->verify_distance(fwd_head_id, fwd.nodeOffset, bwd_head_id, bwd_head_offset);
+	}
+	/**
+	 *  @brief  Verify the outer distance between two alignments of a paired-end read.
+	 *
+	 *  @params aln1 the first alignment
+	 *  @params aln2 the second alignment
+	 *  @return `true` if they meet the distance constraints; i.e. there is a path of a
+	 *  length in the range [m, M], where m and M is the minimum and the maximum of the
+	 *  insert size respectively. Otherwise, it returns `false`.
+	 *
+	 *  NOTE: This function assumes that the input reads are forward-reverse.
+	 */
+	bool verifyDistance(AlignmentResult::AlignmentItem& aln1, AlignmentResult::AlignmentItem& aln2) const
+	{
+		auto fwd = aln1.trace->trace.front().DPposition;
+		auto bwd = aln2.trace->trace.front().DPposition;
 		if (fwd.node % 2 == 1) std::swap(fwd, bwd);
 		auto fwd_head_id = this->psiSeeder->get_graph_ptr()->id_by_coordinate(fwd.node / 2);
 		auto bwd_head_id = this->psiSeeder->get_graph_ptr()->id_by_coordinate(bwd.node / 2);
@@ -139,10 +160,10 @@ struct Seeder
 		auto callback =
 				[this, &chunk, &chunk_hits, &params](const auto& hit) {
 					auto id = this->psiSeeder->get_graph_ptr()->coordinate_id(hit.node_id);
-					bool reversed = hit.read_id % 2;
-					auto read_offset = (reversed ? length(chunk.str[hit.read_id]) - hit.read_offset - 1 : hit.read_offset);
-					auto node_offset = (reversed ? this->psiSeeder->get_graph_ptr()->node_length(hit.node_id) - hit.node_offset - 1 : hit.node_offset);
-					chunk_hits[hit.read_id/2].push_back(SeedHit(id, node_offset, read_offset, params.psiLength, params.psiLength, reversed));
+					bool reverse = hit.read_id % 2;
+					auto read_offset = (reverse ? length(chunk.str[hit.read_id]) - hit.read_offset - 1 : hit.read_offset);
+					auto node_offset = (reverse ? this->psiSeeder->get_graph_ptr()->node_length(hit.node_id) - hit.node_offset - 1 : hit.node_offset);
+					chunk_hits[hit.read_id/2].push_back(SeedHit(id, node_offset, read_offset, params.psiLength, params.psiLength, reverse));
 				};
 		psiSeeder->seeds_all(seeds, sindex, traverser, callback);
 		return chunk_hits;
@@ -794,7 +815,7 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 			{
 				totalcells += alignments->alignments[i].cellsProcessed;
 			}
-		
+
 			std::sort(alignments->alignments.begin(), alignments->alignments.end(), [](const AlignmentResult::AlignmentItem& left, const AlignmentResult::AlignmentItem& right) { return left.alignmentStart < right.alignmentStart; });
 		}
 
@@ -950,7 +971,7 @@ void runComponentMappings(const AlignmentGraph& alignmentGraph, moodycamel::Conc
 					AddGAFLine(alignmentGraph, fastq->seq_id, fastq->sequence, alignments->alignments[i]);
 				}
 			}
-		
+
 			std::sort(alignments->alignments.begin(), alignments->alignments.end(), [](const AlignmentResult::AlignmentItem& left, const AlignmentResult::AlignmentItem& right) { return left.alignmentStart < right.alignmentStart; });
 
 			std::string alignmentpositions;
